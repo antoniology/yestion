@@ -3035,7 +3035,11 @@ export function createRichEditor(
     }
   }
 
-currentEditorRef = editor
+  // The first editor created is the default tool target; focus moves it from
+  // then on (set in onFocus above). Assigning unconditionally here meant that
+  // merely creating the split-pane editor pointed the table/image toolbars at
+  // the hidden pane.
+  if (!currentEditorRef) currentEditorRef = editor
 
   // ---- drag & drop / paste images straight into the page ----------------
   // The file is written next to the page (as a plain file, or into the vault for

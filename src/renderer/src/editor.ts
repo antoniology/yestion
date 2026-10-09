@@ -1,5 +1,5 @@
 import { EditorView } from '@codemirror/view'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorState, Compartment, Transaction } from '@codemirror/state'
 import { markdown } from '@codemirror/lang-markdown'
 import { syntaxHighlighting, HighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
@@ -121,8 +121,24 @@ export function createEditor(
     view,
     getContent: () => view.state.doc.toString(),
     setContent: (text: string) => {
+      const current = view.state.doc.toString()
+      if (current === text) return
+      // Replace only what actually differs. A full-document replace resets the
+      // caret to the end, kills the selection and pollutes the undo history —
+      // which made every rich⇄source sync feel like the text jumped.
+      let start = 0
+      const maxStart = Math.min(current.length, text.length)
+      while (start < maxStart && current.charCodeAt(start) === text.charCodeAt(start)) start++
+      let endCur = current.length
+      let endNew = text.length
+      while (endCur > start && endNew > start && current.charCodeAt(endCur - 1) === text.charCodeAt(endNew - 1)) {
+        endCur--
+        endNew--
+      }
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text }
+        changes: { from: start, to: endCur, insert: text.slice(start, endNew) },
+        // Programmatic write: not an undoable user edit.
+        annotations: Transaction.addToHistory.of(false)
       })
     },
     setTheme: (nextKind: 'light' | 'dark') => {

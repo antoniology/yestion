@@ -275,6 +275,7 @@ function loadIntoEditors(markdown: string): void {
   }
   loadedMarkdown = markdown
   docSource = 'loaded'
+  lastSyncedMd = markdown
 }
 
 function flushSplitSave(): void {
@@ -403,19 +404,23 @@ window.api.onWsExternalChange((rel) => {
 })
 
 const richEditor: RichEditor = createRichEditor(richEditorEl, '', () => {
-  if (!programmatic) docSource = 'rich'
+  // A programmatic write (page load, mode switch, split sync) is not a user
+  // edit — it must not mark the page dirty or kick off a save.
+  if (programmatic) return
+  docSource = 'rich'
   scheduleSave()
   scheduleSplitSync()
   schedulePrintPreview()
 }, pageOpts)
 
 const codeEditor: MarkdownEditor = createEditor(codeMount, '', getTheme('light').kind, () => {
-  if (!programmatic) docSource = 'code'
+  if (programmatic) return
+  docSource = 'code'
   if (sourceMode || viewMode === 'split') scheduleSave()
   scheduleSplitSync()
 })
-richEditorEl.addEventListener('focusin', () => { lastFocused = 'rich' })
-codeMount.addEventListener('focusin', () => { lastFocused = 'code' })
+richEditorEl.addEventListener('focusin', flushSplitSync)
+codeMount.addEventListener('focusin', flushSplitSync)
 
 // ---- page open ----
 function dirOf(relPath: string): string {
@@ -1272,39 +1277,74 @@ function applyViewMode(): void {
   } finally {
     programmatic = false
   }
+  // Both panes now hold `body`; record that so the focus-triggered sync below
+  // is a no-op instead of pushing one pane over the other.
+  const changed = body !== lastSyncedMd
+  lastSyncedMd = body
   if (split) {
-    lastFocused = 'code'
     codeEditor.view.focus()
   } else if (source) {
     codeEditor.view.focus()
   } else {
     richEditor.focus()
   }
-  scheduleSave()
+  // Merely switching modes must never dirty the page — only a body that differs
+  // from what is on disk does.
+  if (changed) scheduleSave()
 }
 
 // ---- split view live sync ----
 let viewMode: 'rich' | 'split' | 'source' = 'rich'
-let lastFocused: 'rich' | 'code' | null = null
 let splitBusy = false
 let splitTimer: number | null = null
+// Markdown currently reflected in BOTH panes, and the pane that last produced
+// the document. Together these stop a stale timer from overwriting a fresh edit
+// with the other pane's older copy.
+let lastSyncedMd: string | null = null
+let composing = false
+for (const el of [richEditorEl, codeMount]) {
+  el.addEventListener('compositionstart', () => { composing = true })
+  el.addEventListener('compositionend', () => { composing = false })
+}
 
 function scheduleSplitSync(): void {
   if (viewMode !== 'split' || splitBusy) return
   if (splitTimer !== null) window.clearTimeout(splitTimer)
-  splitTimer = window.setTimeout(() => {
+  splitTimer = window.setTimeout(runSplitSync, 150)
+}
+
+/** Sync now (used when focus moves panes) instead of waiting for the timer. */
+function flushSplitSync(): void {
+  if (viewMode !== 'split') return
+  if (splitTimer !== null) {
+    window.clearTimeout(splitTimer)
     splitTimer = null
-    if (viewMode !== 'split') return
-    splitBusy = true
-    programmatic = true
-    try {
-      if (lastFocused === 'code') richEditor.setContent(codeEditor.getContent())
-      else codeEditor.setContent(richEditor.getMarkdown())
-    } finally {
-      programmatic = false
-      splitBusy = false
-    }
-  }, 350)
+  }
+  runSplitSync()
+}
+
+function runSplitSync(): void {
+  splitTimer = null
+  if (viewMode !== 'split' || splitBusy) return
+  // Never disturb an in-progress IME composition.
+  if (composing) return
+  // Direction comes from whatever produced the current document — not from
+  // which pane was focused last. Clicking the other pane must not punish the
+  // text the user just typed.
+  const from = docSource
+  if (from !== 'rich' && from !== 'code') return
+  splitBusy = true
+  programmatic = true
+  try {
+    const md = from === 'rich' ? richEditor.getMarkdown() : codeEditor.getContent()
+    if (md === lastSyncedMd) return
+    lastSyncedMd = md
+    if (from === 'rich') codeEditor.setContent(md)
+    else richEditor.setContent(md)
+  } finally {
+    programmatic = false
+    splitBusy = false
+  }
 }
 
 // ---- sidebar ----
@@ -2544,6 +2584,10 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
     await saveSplitNow()
   }
   await refreshSplitRoot()
+  // Read the page BEFORE rebinding splitRel: while the old page is still the
+  // target, a stray save (debounce timer, blur) can't write the old body to the
+  // new path.
+  const page = kind === 'page' ? await window.api.wsRead(rel) : null
   splitOpen = true
   splitRightEl.hidden = false
   splitRel = rel
@@ -2556,7 +2600,6 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
   renderTabs()
 
   if (kind === 'page') {
-    const page = await window.api.wsRead(rel)
     if (!page) {
       splitBodyEl.innerHTML = '<div class="split-note">Could not read this page.</div>'
       return
