@@ -5242,15 +5242,13 @@ code {
 
 
 /* ============================================================
-   Agent panel: no outlines
+   Agent panel focus
+   Mouse focus stays clean, but keyboard focus must remain visible — the
+   blanket `outline: none !important` here made the whole panel un-tabbable.
    ============================================================ */
 .agent-panel,
-.agent-panel *,
-.agent-panel *:focus,
-.agent-panel *:focus-visible,
-.agent-panel *:active {
-  outline: none !important;
-  box-shadow: none !important;
+.agent-panel *:focus:not(:focus-visible) {
+  outline: none;
 }
 
 
@@ -5275,4 +5273,279 @@ code {
 .sidebar-header-plus:hover {
   color: var(--text);
   background: var(--hover-bg);
+}
+
+
+/* ============================================================
+   Motion system
+   Subtle and Notion-like: short, decelerating, no bounce. Every overlay
+   here is toggled with the [hidden] attribute, so it cannot use a CSS
+   transition (display:none doesn't interpolate) — instead it plays a
+   keyframe animation, which the browser runs the moment the element is
+   rendered. Enter only: overlays still dismiss instantly, which is what
+   makes menus feel responsive.
+   ============================================================ */
+:root {
+  --dur-fast: 120ms;
+  --dur: 170ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes y-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes y-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes y-card-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes y-drop-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Menus, popovers, pickers, toolbars. */
+.crumb-pop,
+.ws-menu,
+.slash-menu,
+.agent-slash-menu,
+.emoji-picker,
+.agent-recent-pop,
+.export-menu,
+.page-view-menu,
+.page-picker,
+.tab-picker,
+.table-size-picker,
+.table-toolbar,
+.highlight-popup,
+.math-editor-popup {
+  animation: y-pop-in var(--dur) var(--ease) both;
+  transform-origin: top center;
+}
+
+/* The find bar drops in from the top edge. */
+.find-bar {
+  animation: y-drop-in var(--dur) var(--ease) both;
+}
+
+/* Modals: scrim fades, card lifts. */
+.modal-backdrop {
+  animation: y-fade-in var(--dur-fast) var(--ease) both;
+}
+
+.modal,
+.search-modal {
+  animation: y-card-in var(--dur) var(--ease) both;
+}
+
+/* Sidebar tree: animate the expand/collapse instead of snapping. The outer
+   element is a one-row grid and the inner one clips, so the 0fr → 1fr
+   transition works even though the content height is auto. */
+.tree-children {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur) var(--ease);
+}
+
+.tree-children.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.tree-children-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Press feedback: a visible, immediate acknowledgement on click. */
+.btn:active:not(:disabled),
+.ghost-btn:active:not(:disabled),
+.icon-btn:active:not(:disabled),
+.sidebar-header-plus:active,
+.tab:active,
+.ws-menu-item:active,
+.crumb-pop-item:active,
+.agent-recent-item:active,
+.slash-item:active,
+.emoji-grid button:active {
+  transform: scale(0.975);
+}
+
+/* Keyboard focus must be visible — but only for keyboard users. Text inputs
+   are deliberately left out: browsers report them as :focus-visible even on a
+   mouse click, and a ring on every field is noise, not affordance. */
+.btn:focus-visible,
+.ghost-btn:focus-visible,
+.icon-btn:focus-visible,
+.tab:focus-visible,
+.ws-menu-item:focus-visible,
+.crumb-pop-item:focus-visible,
+.agent-recent-item:focus-visible,
+.slash-item:focus-visible,
+.tree-item:focus-visible,
+.sidebar-header-plus:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Windows / scrolling hygiene */
+.page-scroll,
+.page-tree,
+.agent-messages,
+.search-results,
+.settings-body {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.page-scroll::-webkit-scrollbar,
+.page-tree::-webkit-scrollbar,
+.agent-messages::-webkit-scrollbar,
+.search-results::-webkit-scrollbar,
+.settings-body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.page-scroll::-webkit-scrollbar-thumb,
+.page-tree::-webkit-scrollbar-thumb,
+.agent-messages::-webkit-scrollbar-thumb,
+.search-results::-webkit-scrollbar-thumb,
+.settings-body::-webkit-scrollbar-thumb {
+  background: var(--muted-3);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+.page-scroll::-webkit-scrollbar-thumb:hover,
+.page-tree::-webkit-scrollbar-thumb:hover,
+.agent-messages::-webkit-scrollbar-thumb:hover,
+.search-results::-webkit-scrollbar-thumb:hover,
+.settings-body::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-2);
+  background-clip: content-box;
+}
+
+.page-scroll::-webkit-scrollbar-track,
+.page-tree::-webkit-scrollbar-track,
+.agent-messages::-webkit-scrollbar-track,
+.search-results::-webkit-scrollbar-track,
+.settings-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Respect the OS setting: keep state changes legible, drop the motion. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur: 1ms;
+  }
+
+  .crumb-pop,
+  .ws-menu,
+  .slash-menu,
+  .agent-slash-menu,
+  .emoji-picker,
+  .agent-recent-pop,
+  .export-menu,
+  .page-view-menu,
+  .page-picker,
+  .tab-picker,
+  .table-size-picker,
+  .table-toolbar,
+  .highlight-popup,
+  .math-editor-popup,
+  .find-bar,
+  .modal-backdrop,
+  .modal,
+  .search-modal {
+    animation: none;
+  }
+
+  .tree-children {
+    transition: none;
+  }
+
+  .btn:active,
+  .ghost-btn:active,
+  .icon-btn:active,
+  .tab:active,
+  .ws-menu-item:active,
+  .crumb-pop-item:active,
+  .agent-recent-item:active,
+  .slash-item:active,
+  .emoji-grid button:active {
+    transform: none;
+  }
+}
+
+/* Panel show/hide (sidebar, agent): a short slide+fade on the way in.
+   Transform/opacity only — the resizer measures the element's box, so
+   animating flex-basis or width would fight it. */
+@keyframes y-slide-in-left {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes y-slide-in-right {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+#sidebar:not([hidden]) {
+  animation: y-slide-in-left var(--dur) var(--ease) both;
+}
+
+#agent-panel:not([hidden]) {
+  animation: y-slide-in-right var(--dur) var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #sidebar:not([hidden]),
+  #agent-panel:not([hidden]) {
+    animation: none;
+  }
+}
+
+/* One hover/press timing for every interactive control, so feedback lands on
+   the same beat everywhere instead of 60ms here and 140ms there. */
+.btn,
+.ghost-btn,
+.icon-btn,
+.tab,
+.ws-menu-item,
+.crumb-pop-item,
+.agent-recent-item,
+.slash-item,
+.emoji-grid button,
+.sidebar-header-plus,
+.tree-item {
+  transition-property: background-color, color, border-color, opacity, transform;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease);
+}
+
+/* Popovers read as floating surfaces: a softer, larger elevation than the
+   card-level --shadow-md they used to share with static panels. */
+.crumb-pop,
+.ws-menu,
+.slash-menu,
+.agent-slash-menu,
+.emoji-picker,
+.agent-recent-pop,
+.export-menu,
+.page-view-menu,
+.page-picker,
+.tab-picker,
+.table-size-picker,
+.table-toolbar {
+  box-shadow: var(--shadow-popover);
 }

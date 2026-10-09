@@ -1814,7 +1814,8 @@ pageTitleEl.addEventListener('input', () => {
     refreshActiveTabLabel(currentPage.title, currentPage.icon)
     renderBreadcrumbs()
     scheduleSave()
-    queueTreeRefresh()
+    // The sidebar row is renamed in place when the save drains (updateTreeLabel)
+    // — no workspace scan while typing a title.
   }
 })
 

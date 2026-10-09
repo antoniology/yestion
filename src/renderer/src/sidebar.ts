@@ -180,18 +180,22 @@ function pageRow(
       const nowExpanded = userExpanded.has(page.relPath)
       if (nowExpanded) userExpanded.delete(page.relPath)
       else userExpanded.add(page.relPath)
-      childrenBox.hidden = nowExpanded
+      childrenBox.classList.toggle('collapsed', nowExpanded)
       toggle.dataset.open = String(!nowExpanded)
       toggle.title = nowExpanded ? 'Expand' : 'Collapse'
     })
     row.style.paddingLeft = '6px'
     line.append(toggle, row)
+    // Grid-wrapped so expand/collapse can animate (0fr → 1fr); `hidden` snaps
+    // because display isn't animatable.
     const childrenBox = document.createElement('div')
-    childrenBox.className = 'tree-children'
-    childrenBox.hidden = !expanded
+    childrenBox.className = 'tree-children' + (expanded ? '' : ' collapsed')
+    const childrenInner = document.createElement('div')
+    childrenInner.className = 'tree-children-inner'
     for (const child of page.children ?? []) {
-      childrenBox.appendChild(nodeRow(child, opts, depth + 1))
+      childrenInner.appendChild(nodeRow(child, opts, depth + 1))
     }
+    childrenBox.appendChild(childrenInner)
     branch.append(line, childrenBox)
     return branch
   }
