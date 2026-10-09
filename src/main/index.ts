@@ -715,7 +715,15 @@ function registerWorkspaceHandlers(): void {
   ipcMain.handle('ws:read', async (_e, relPath: string) => {
     const root = getWorkspace()
     if (!root) return null
-    return readPage(join(root, relPath), relPath)
+    try {
+      return await readPage(join(root, relPath), relPath)
+    } catch (err) {
+      // Switching workspace restores the tabs of the workspace you left; their
+      // paths usually don't exist in the new one. "No such page" is an answer,
+      // not a fault, and the renderer already skips null entries.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
+      return null
+    }
   })
   ipcMain.handle('ws:save', async (_e, payload: { relPath: string; title: string; icon: string; body: string }) => {
     const root = getWorkspace()

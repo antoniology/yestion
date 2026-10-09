@@ -502,6 +502,10 @@ async function normalizeRel(p: string): Promise<string> {
 
 let tabs: TabInfo[] = []
 let activeTab = 0
+/** What each workspace had open, so switching away and back lands where you
+ *  left off instead of on the other workspace's page list. Session-only: the
+ *  last workspace's tabs are still restored from settings on a cold start. */
+const tabsByWorkspace = new Map<string, { tabs: TabInfo[]; activeTab: number }>()
 
 // ---------------------------------------------------------------------------
 // Browser-style navigation history (back / forward arrows in the toolbar).
@@ -882,13 +886,18 @@ function refreshActiveTabLabel(title: string, icon: string): void {
   persistTabs()
 }
 
-async function restoreTabs(): Promise<void> {
-  const saved = ((await window.api.getSettings('openTabs')) as TabInfo[] | undefined) ?? []
-  const savedActive = ((await window.api.getSettings('activeTab')) as number | undefined) ?? 0
+/** Rebuild the tab strip from `remembered` (a workspace we've already visited
+ *  this session) or from the last persisted set. Returns true when at least one
+ *  tab survived; the caller opens a page to fall back to otherwise. */
+async function restoreTabs(remembered?: { tabs: TabInfo[]; activeTab: number }): Promise<boolean> {
+  const saved = remembered?.tabs ?? ((await window.api.getSettings('openTabs')) as TabInfo[] | undefined) ?? []
+  const savedActive = remembered?.activeTab ?? ((await window.api.getSettings('activeTab')) as number | undefined) ?? 0
   const info = await window.api.wsGet()
   if (!info.workspace || saved.length === 0) {
+    tabs = []
+    activeTab = 0
     renderTabs()
-    return
+    return false
   }
   const candidates = saved.filter((t) => t && typeof t.relPath === 'string')
   // Drop tabs whose file disappeared while the app was closed, so a stale
@@ -909,12 +918,14 @@ async function restoreTabs(): Promise<void> {
     }
   }
   if (tabs.length === 0) {
+    activeTab = 0
     renderTabs()
-    return
+    return false
   }
   activeTab = Math.max(0, Math.min(savedActive, tabs.length - 1))
   renderTabs()
   await loadTabContent(tabs[activeTab])
+  return true
 }
 
 async function newTab(): Promise<void> {
@@ -3330,6 +3341,10 @@ async function initWorkspace(): Promise<void> {
   if (seq !== bootSeq) return // superseded by a newer boot
   const base = res.workspace
   if (base !== cacheWorkspacePath) {
+    // Remember where this workspace was, so coming back to it restores its own
+    // tabs. Without this, a switch restored the other workspace's tab list,
+    // every entry of which fails to open — leaving a blank window.
+    if (cacheWorkspacePath) tabsByWorkspace.set(cacheWorkspacePath, { tabs: tabs.map((t) => ({ ...t })), activeTab })
     // A different workspace may reuse the same relative paths — start clean.
     pageCache.clear()
     cacheWorkspacePath = base
@@ -3395,13 +3410,11 @@ async function initWorkspace(): Promise<void> {
         void openRel(rel, kind, newTab === true)
       }
     })
-    const savedTabs = (await window.api.getSettings('openTabs')) as unknown[] | undefined
     const firstRel = findFirstPage(tree)
-    if (savedTabs && savedTabs.length > 0) {
-      await restoreTabs()
-    } else if (firstRel) {
+    const restored = await restoreTabs(tabsByWorkspace.get(base))
+    if (!restored && firstRel) {
       await openRel(firstRel, 'page')
-    } else {
+    } else if (!restored) {
       pageViewEl.hidden = true
       emptyStateEl.hidden = false
     }
