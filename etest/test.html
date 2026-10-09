@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0}</style></head><body>
+<script type="module">
+import * as pdfjsLib from '/Users/hacker/Applications/yestion/node_modules/pdfjs-dist/build/pdf.mjs'
+const q = new URLSearchParams(location.search)
+const workerText = await (await fetch('/Users/hacker/Applications/yestion/node_modules/pdfjs-dist/build/pdf.worker.min.mjs')).text()
+pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([workerText], { type: 'text/javascript' }))
+try {
+  const bytes = new Uint8Array(await (await fetch('file://' + q.get('pdf'))).arrayBuffer())
+  const doc = await pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise
+  const out = []
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n)
+    const vp = page.getViewport({ scale: 1 })
+    const c = document.createElement('canvas')
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height)
+    const ctx = c.getContext('2d')
+    await page.render({ canvasContext: ctx, viewport: vp }).promise
+    const d = ctx.getImageData(0, 0, c.width, c.height).data
+    let ink = 0
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 240 || d[i+1] < 240 || d[i+2] < 240) ink++
+    out.push(`p${n}:${(ink / (c.width*c.height) * 100).toFixed(2)}%`)
+  }
+  console.log('INK ' + JSON.stringify(out))
+} catch (e) { console.log('ERR ' + (e && e.message)) }
+console.log('DONE')
+</script></body></html>

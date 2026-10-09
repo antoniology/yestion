@@ -1,0 +1,9 @@
+node_modules
+out
+dist
+resources/icon.icns
+resources/icon.png
+resources/icon.iconset
+*.log
+.DS_Store
+*.tsbuildinfo

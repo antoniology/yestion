@@ -1,0 +1,3526 @@
+import { createRichEditor, type RichEditor, type YestionPageOpts } from './wysiwyg'
+import { createEditor, type MarkdownEditor } from './editor'
+import { applyTheme, getTheme, nextTheme, THEMES } from './themes'
+import { fillFontSelect, fontById } from './fonts'
+import { setupOnboarding } from './onboarding'
+import { setupSidebar } from './sidebar'
+import { setupAgentPanel } from './agent'
+import { setupSettings } from './settings'
+import { EMOJI_LIST, EMOJI_GROUPS } from './emoji-data'
+import './styles.css'
+import { createPdfViewer, type PdfViewerHandle } from './pdf-viewer'
+
+// Fonts live in ./fonts.ts (shared with the settings modal).
+
+// Rendered text size. Only the type scale changes: the text column keeps its
+// width, so bigger sizes mean fewer words per line (unlike zoom, which would
+// scale the column with the text).
+const RENDER_SIZES = [
+  { id: 'xs', label: 'Size: Extra small', px: 13, scale: 13 / 16 },
+  { id: 's', label: 'Size: Small', px: 14.5, scale: 14.5 / 16 },
+  { id: 'm', label: 'Size: Medium', px: 16, scale: 1 },
+  { id: 'l', label: 'Size: Large', px: 18, scale: 18 / 16 },
+  { id: 'xl', label: 'Size: Extra large', px: 20.5, scale: 20.5 / 16 }
+] as const
+
+function applyRenderSize(id: string): void {
+  const size = RENDER_SIZES.find((s) => s.id === id) ?? RENDER_SIZES[2]
+  const root = document.documentElement
+  root.style.setProperty('--render-font-size', size.px + 'px')
+  root.style.setProperty('--render-font-scale', String(size.scale))
+  root.dataset.renderSize = size.id
+}
+
+// ---- DOM ----
+const welcomeEl = document.getElementById('welcome') as HTMLElement
+const emptyStateEl = document.getElementById('empty-state') as HTMLElement
+const pageViewEl = document.getElementById('page-view') as HTMLElement
+const pageLoaderEl = document.getElementById('page-loader') as HTMLElement
+const breadcrumbsEl = document.getElementById('breadcrumbs') as HTMLElement
+const pageIconEl = document.getElementById('page-icon') as HTMLButtonElement
+const pageTitleEl = document.getElementById('page-title') as HTMLInputElement
+const editorMount = document.getElementById('editor-mount') as HTMLElement
+const codeMount = document.getElementById('code-mount') as HTMLElement
+const toggleSourceBtn = document.getElementById('toggle-source-btn') as HTMLButtonElement
+const saveStatusEl = document.getElementById('save-status') as HTMLElement
+const workspaceNameEl = document.getElementById('workspace-name') as HTMLElement
+const pdfPaneEl = document.getElementById('pdf-pane') as HTMLElement
+const pdfViewEl = document.getElementById('pdf-view') as HTMLElement
+const imagePaneEl = document.getElementById('image-pane') as HTMLElement
+const imageViewEl = document.getElementById('image-view') as HTMLImageElement
+const imageStageEl = document.getElementById('image-stage') as HTMLElement
+
+// ---- state ----
+let currentPage: { relPath: string; absolutePath: string; title: string; icon: string; body: string; dirRel: string } | null = null
+let sourceMode = false
+let dirty = false
+// Echo suppression: our own save comes back through the file watcher ~0.5s
+// later. Reloading that identical content re-creates the editor state and
+// dumps the caret at the end of the document — so remember what we wrote.
+let lastSavedBody: string | null = null
+
+// Save: debounce + flush on blur/hidden.
+let saveTimer: number | null = null
+let saveInFlight = false
+let saveVersion = 0
+let saveRetry = false
+const SAVE_DEBOUNCE_MS = 1200
+
+function setSaveStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): void {
+  saveStatusEl.textContent = text
+  saveStatusEl.classList.toggle('ok', kind === 'ok')
+  saveStatusEl.classList.toggle('pending', kind === 'pending')
+  saveStatusEl.classList.toggle('error', kind === 'error')
+  if (text) saveStatusEl.title = new Date().toLocaleTimeString() + ' — ' + text
+}
+
+async function persistNow(): Promise<void> {
+  if (!currentPage || !dirty) return
+  if (saveInFlight) {
+    saveRetry = true
+    return
+  }
+  saveInFlight = true
+  const version = saveVersion
+  let snapshot: { relPath: string; title: string; icon: string; body: string }
+  try {
+    snapshot = {
+      relPath: currentPage.relPath,
+      body: getActiveBody(),
+      title: pageTitleEl.value.trim() || currentPage.title,
+      icon: currentPage.icon
+    }
+  } catch (err) {
+    saveInFlight = false
+    // Log the full error: the status line only has room for the message, and
+    // serializer failures ("str.replace is not a function") need the stack.
+    console.error('[yestion] save failed while serializing:', err)
+    setSaveStatus('Save failed: ' + String((err as Error).message ?? err))
+    return
+  }
+  try {
+    const ok = await window.api.wsSave({
+      relPath: currentPage.relPath,
+      title: snapshot.title,
+      icon: snapshot.icon,
+      body: snapshot.body
+    })
+    if (ok) {
+      dirty = false
+      lastSavedBody = snapshot.body
+      setSaveStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+      window.setTimeout(() => void refreshTree(), 80)
+    } else {
+      setSaveStatus('Save failed')
+    }
+  } catch (err) {
+    console.error('[yestion] save failed:', err)
+    setSaveStatus('Save failed: ' + String((err as Error).message ?? err))
+  } finally {
+    saveInFlight = false
+    // Content changed while the write was in flight (typing, icon, title):
+    // coalesce into one follow-up save.
+    if (version !== saveVersion || saveRetry) {
+      saveRetry = false
+      window.setTimeout(() => void persistNow(), 250)
+    }
+  }
+}
+
+function flushSave(): void {
+  if (!dirty) return
+  if (saveTimer !== null) {
+    window.clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  void persistNow()
+}
+
+function scheduleSave(): void {
+  dirty = true
+  saveVersion += 1
+  setSaveStatus('Unsaved…')
+  if (saveTimer !== null) window.clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(() => {
+    saveTimer = null
+    void persistNow()
+  }, SAVE_DEBOUNCE_MS)
+}
+
+// Which surface last produced the document: the file as loaded, the rich
+// editor, or the plain-text editor. When nothing has been edited we save the
+// ORIGINAL markdown bytes back, so merely viewing a note in rich mode can never
+// rewrite/reformat it (that round trip is what merged break-only lines).
+let docSource: 'loaded' | 'rich' | 'code' = 'loaded'
+let loadedMarkdown = ''
+let programmatic = false
+
+function getActiveBody(): string {
+  if (sourceMode || docSource === 'code') {
+    const text = codeEditor.getContent()
+    // Markdown needs a terminating newline: at EOF a trailing hard-break
+    // backslash is read back as a literal character, which made break-heavy
+    // notes change on every save/load. Same convention most editors use.
+    return text.endsWith('\n') ? text : text + '\n'
+  }
+  if (docSource === 'rich') return richEditor.getMarkdown()
+  return loadedMarkdown || richEditor.getMarkdown()
+}
+
+// Load markdown into both surfaces without marking either as the author.
+function loadIntoEditors(markdown: string): void {
+  programmatic = true
+  try {
+    richEditor.setContent(markdown)
+    codeEditor.setContent(markdown)
+  } finally {
+    programmatic = false
+  }
+  loadedMarkdown = markdown
+  docSource = 'loaded'
+}
+
+function flushSplitSave(): void {
+  if (!splitDirty) return
+  if (splitSaveTimer !== null) {
+    window.clearTimeout(splitSaveTimer)
+    splitSaveTimer = null
+  }
+  void saveSplitNow()
+}
+
+window.addEventListener('blur', () => {
+  void persistNow()
+  flushSplitSave()
+})
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    void persistNow()
+    flushSplitSave()
+  }
+})
+
+// ---- editors ----
+const richEditorEl = document.createElement('div')
+richEditorEl.className = 'markdown-body rich-editor'
+editorMount.appendChild(richEditorEl)
+
+const pageOpts: YestionPageOpts = {
+  getBaseDir: () => (currentPage ? currentPage.absolutePath.replace(/\/[^/]*$/, '') : null),
+  resolvePage: async (name) => {
+    const page = await window.api.wsResolveLink(name, currentPage?.dirRel ?? undefined)
+    return page ? { title: page.title, icon: page.icon } : null
+  },
+  openPage: async (name) => {
+    const page = await window.api.wsResolveLink(name, currentPage?.dirRel ?? undefined)
+    if (page) await openPageByRel(page.relPath)
+  },
+  getPages: () => window.api.wsAllPages(),
+  createPage: (name: string) => createPageNamed(name),
+  // A new page/[[page]] chip just landed in the editor → save immediately so
+  // the link can never be lost to the debounce (or a quick navigation).
+  afterNewPageLink: () => window.setTimeout(flushSave, 60),
+  openFileRef: (absolutePath: string) => void openFileRef(absolutePath)
+}
+
+// The link model moves pages on disk (unlinking exiles a page to bin/, a new
+// link adopts it). Anything pointing at the old path has to follow, or the next
+// save would recreate the page at its old location.
+window.api.onPageMoved((moves) => {
+  for (const move of moves) {
+    for (const tab of tabs) {
+      if (tab.relPath === move.from) tab.relPath = move.to
+    }
+    if (currentPage && currentPage.relPath === move.from) {
+      currentPage = {
+        ...currentPage,
+        relPath: move.to,
+        absolutePath: currentPage.absolutePath.replace(currentPage.relPath, move.to),
+        dirRel: dirOf(move.to)
+      }
+    }
+    const remembered = scrollMemory.get(move.from)
+    if (remembered !== undefined) {
+      scrollMemory.delete(move.from)
+      scrollMemory.set(move.to, remembered)
+    }
+    if (splitRel === move.from) splitRel = move.to
+  }
+  renderTabs()
+  persistTabs()
+  void refreshTree()
+})
+
+// The agent (or Finder) edits files on disk; refresh what the user sees.
+window.api.onWsExternalChange((rel) => {
+  void (async () => {
+    await refreshTree()
+    if (currentFile && rel === currentFile.relPath && !fileDirty) {
+      const fresh = await window.api.readTextFile(currentFile.relPath)
+      if (fresh && textEditor) {
+        textEditor.setContent(fresh.content)
+        setFileStatus('')
+      }
+      return
+    }
+    if (!currentPage) return
+    if (rel !== currentPage.relPath) return
+    // Preserve the user's own unsaved typing; otherwise reload from disk.
+    if (dirty) {
+      setSaveStatus('File changed on disk — save to overwrite')
+      return
+    }
+    const fresh = await window.api.wsRead(currentPage.relPath)
+    if (!fresh) return
+    // The main process already filters out our own saves, so this is an agent /
+    // external edit. When the body is unchanged (a rename, an icon tweak, or a
+    // write with identical bytes) just sync the metadata — re-setting identical
+    // content would push the caret to the end of the document.
+    if (fresh.body === lastSavedBody) {
+      currentPage = { ...fresh, dirRel: dirOf(fresh.relPath) }
+      pageIconEl.textContent = fresh.icon
+      pageIconEl.classList.toggle('no-icon', !fresh.icon)
+      pageTitleEl.value = fresh.title
+      refreshActiveTabLabel(fresh.title, fresh.icon)
+      persistTabs()
+      return
+    }
+    currentPage = { ...fresh, dirRel: dirOf(fresh.relPath) }
+    pageIconEl.textContent = fresh.icon
+    pageIconEl.classList.toggle('no-icon', !fresh.icon)
+    pageTitleEl.value = fresh.title
+    loadIntoEditors(fresh.body)
+    setSaveStatus('')
+  })()
+})
+
+const richEditor: RichEditor = createRichEditor(richEditorEl, '', () => {
+  if (!programmatic) docSource = 'rich'
+  scheduleSave()
+  scheduleSplitSync()
+  schedulePrintPreview()
+}, pageOpts)
+
+const codeEditor: MarkdownEditor = createEditor(codeMount, '', getTheme('light').kind, () => {
+  if (!programmatic) docSource = 'code'
+  if (sourceMode || viewMode === 'split') scheduleSave()
+  scheduleSplitSync()
+})
+richEditorEl.addEventListener('focusin', () => { lastFocused = 'rich' })
+codeMount.addEventListener('focusin', () => { lastFocused = 'code' })
+
+// ---- page open ----
+function dirOf(relPath: string): string {
+  if (relPath.endsWith('/index.md')) return relPath.slice(0, -'/index.md'.length)
+  return relPath.includes('/') ? relPath.replace(/\/[^/]*$/, '') : ''
+}
+
+async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Promise<void> {
+  // Flush pending edits BEFORE switching. Otherwise a chip/typing queued for
+  // the debounced save is dropped when we navigate away: dirty goes false
+  // (no save) and the timer later sees "not dirty" and never saves.
+  if (dirty && saveTimer !== null) {
+    window.clearTimeout(saveTimer)
+    saveTimer = null
+    await persistNow()
+  }
+  const page = await window.api.wsRead(relPath)
+  if (!page) return
+  recordNav({ rel: page.relPath, kind: 'page', title: page.title })
+  currentPage = { ...page, dirRel: dirOf(relPath) }
+  dirty = false
+  setSaveStatus('')
+  releasePdfViewer()
+  pdfPaneEl.hidden = true
+  textPaneEl.hidden = true
+  currentFile = null
+  pageViewEl.hidden = false
+  welcomeEl.hidden = true
+  emptyStateEl.hidden = true
+  pageLoaderEl.hidden = true
+  pageIconEl.textContent = page.icon
+  pageIconEl.classList.toggle('no-icon', !page.icon)
+  pageTitleEl.value = page.title
+  ;(document.getElementById('page-tree') as HTMLElement).dataset.currentRel = page.relPath
+  if (opts.tab !== false) upsertActiveTab({ relPath: page.relPath, kind: 'page', title: page.title, icon: page.icon })
+  ;(document.getElementById('crumb-bar') as HTMLElement).hidden = false
+  if (!findBarEl.hidden) closeFind()
+  schedulePrintPreview(200)
+  lastSavedBody = page.body
+  scheduleOutline(120)
+  renderBreadcrumbs()
+  toggleSourceBtn.textContent = 'Split'
+  viewMode = 'rich'
+  sourceMode = false
+  codeMount.hidden = true
+  editorMount.hidden = false
+  ;(document.querySelector('.page-scroll') as HTMLElement).classList.remove('split-view')
+  loadIntoEditors(page.body)
+  window.scrollTo(0, 0)
+  await refreshTree()
+}
+
+// ---------------------------------------------------------------------------
+// Notion-style tabs: several pages / PDFs / files open side by side, persisted
+// per workspace. Clicking the sidebar replaces the active tab; ⌘-click or the
+// "+" button opens another one.
+// ---------------------------------------------------------------------------
+interface TabInfo {
+  relPath: string
+  kind: 'page' | 'pdf' | 'image' | 'file' | 'binary'
+  title: string
+  icon?: string
+  /** Remembered scroll position of this tab's content. */
+  scrollTop?: number
+}
+
+// Workspace-relative paths keep tabs deduplicating (a PDF opened from a page
+// chip used to be stored as an absolute path, so clicking the same file in the
+// tree produced a second, duplicate tab).
+async function normalizeRel(p: string): Promise<string> {
+  if (!p.startsWith('/')) return p
+  const info = await window.api.wsGet()
+  const root = info.workspace
+  if (root && p.startsWith(root + '/')) return p.slice(root.length + 1)
+  return p
+}
+
+let tabs: TabInfo[] = []
+let activeTab = 0
+
+// ---------------------------------------------------------------------------
+// Browser-style navigation history (back / forward arrows in the toolbar).
+// Every content load funnels through loadTabContent, so that is where entries
+// are recorded; going back/forward replays an entry without recording it.
+// ---------------------------------------------------------------------------
+interface NavEntry {
+  rel: string
+  kind: string
+  title: string
+}
+
+let navHistory: NavEntry[] = []
+let navIndex = -1
+let navReplaying = false
+const NAV_LIMIT = 200
+
+function updateNavButtons(): void {
+  const back = document.getElementById('nav-back') as HTMLButtonElement | null
+  const fwd = document.getElementById('nav-forward') as HTMLButtonElement | null
+  if (back) back.disabled = navIndex <= 0
+  if (fwd) fwd.disabled = navIndex >= navHistory.length - 1
+}
+
+function recordNav(entry: NavEntry): void {
+  if (navReplaying) return
+  const current = navHistory[navIndex]
+  if (current && current.rel === entry.rel && current.kind === entry.kind) return
+  // Navigating away from the middle of the history drops the forward entries,
+  // exactly like a browser.
+  navHistory = navHistory.slice(0, navIndex + 1)
+  navHistory.push(entry)
+  if (navHistory.length > NAV_LIMIT) navHistory.shift()
+  navIndex = navHistory.length - 1
+  updateNavButtons()
+}
+
+function replayNav(entry: NavEntry): void {
+  navReplaying = true
+  void openRel(entry.rel, entry.kind)
+    .catch((err) => console.warn('history navigation failed', err))
+    .finally(() => {
+      navReplaying = false
+      updateNavButtons()
+    })
+}
+
+function goBack(): void {
+  if (navIndex <= 0) return
+  navIndex--
+  recordNavFromIndex()
+}
+
+function goForward(): void {
+  if (navIndex >= navHistory.length - 1) return
+  navIndex++
+  recordNavFromIndex()
+}
+
+function recordNavFromIndex(): void {
+  const entry = navHistory[navIndex]
+  updateNavButtons()
+  if (entry) replayNav(entry)
+}
+const tabBarEl = document.getElementById('tab-bar') as HTMLElement
+
+function tabIconFor(tab: TabInfo): string {
+  if (tab.icon) return tab.icon
+  if (tab.kind === 'pdf') return '📕'
+  if (tab.kind === 'image') return '🖼'
+  if (tab.kind === 'file') return fileIconFor(tab.relPath)
+  if (tab.kind === 'binary') return '📦'
+  return '📄'
+}
+
+function persistTabs(): void {
+  void window.api.setSettings('openTabs', tabs)
+  void window.api.setSettings('activeTab', activeTab)
+}
+
+function renderTabs(): void {
+  tabBarEl.hidden = tabs.length === 0
+  renderOpenEditors()
+  tabBarEl.innerHTML = ''
+  if (tabs.length === 0) return
+  tabs.forEach((tab, i) => {
+    const el = document.createElement('div')
+    const leftRel = tabs[activeTab]?.relPath
+    const activeRel = splitOpen && activePane === 'right' ? splitRel : leftRel
+    const otherRel = splitOpen ? (activePane === 'right' ? leftRel : splitRel) : null
+    el.className =
+      'tab' +
+      (tab.relPath === activeRel ? ' active' : '') +
+      (otherRel && tab.relPath === otherRel ? ' in-split' : '')
+    el.draggable = true
+    el.title = tab.relPath
+    const icon = document.createElement('span')
+    icon.className = 'tab-icon'
+    icon.textContent = tabIconFor(tab)
+    const label = document.createElement('span')
+    label.className = 'tab-label'
+    label.textContent = tab.title
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.className = 'tab-close'
+    close.textContent = '✕'
+    close.title = 'Close tab'
+    close.addEventListener('click', (e) => {
+      e.stopPropagation()
+      closeTab(i)
+    })
+    el.append(icon, label, close)
+    el.addEventListener('click', () => {
+      // In split view the tab strip belongs to the active pane: clicking a tab
+      // puts it in the pane the user is working in.
+      if (splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
+        void setSplitTarget(tab.relPath, tab.kind, tab.title)
+        return
+      }
+      void activateTab(i)
+    })
+    el.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault()
+        closeTab(i)
+      }
+    })
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      void window.api.showItemMenu({ relPath: tab.relPath, kind: tab.kind, name: tab.title, isTab: true })
+    })
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer?.setData('text/yestion-tab', String(i))
+    })
+    el.addEventListener('dragover', (e) => e.preventDefault())
+    el.addEventListener('drop', (e) => {
+      e.preventDefault()
+      const from = Number(e.dataTransfer?.getData('text/yestion-tab') ?? '-1')
+      if (from < 0 || from === i) return
+      const [moved] = tabs.splice(from, 1)
+      tabs.splice(i, 0, moved)
+      activeTab = tabs.indexOf(moved)
+      renderTabs()
+      persistTabs()
+    })
+    tabBarEl.appendChild(el)
+  })
+  const add = document.createElement('button')
+  add.type = 'button'
+  add.className = 'tab-add'
+  add.textContent = '＋'
+  add.title = 'New tab (⌘T)'
+  add.addEventListener('click', () => void newTab())
+  tabBarEl.appendChild(add)
+}
+
+function upsertActiveTab(info: TabInfo): void {
+  if (tabs.length === 0) {
+    tabs.push(info)
+    activeTab = 0
+  } else {
+    // The slot is being repurposed for a different page: keep the scroll
+    // memory only when it is the same page (a title/icon refresh).
+    const prev = tabs[activeTab]
+    tabs[activeTab] = prev && prev.relPath === info.relPath ? { ...info, scrollTop: prev.scrollTop } : info
+  }
+  renderTabs()
+  persistTabs()
+}
+
+function tabIndexFor(relPath: string): number {
+  return tabs.findIndex((t) => t.relPath === relPath)
+}
+
+// Which element scrolls depends on which pane is showing.
+function captureActiveScroll(): number | undefined {
+  if (!pageViewEl.hidden) {
+    const el = pageViewEl.querySelector('.page-scroll') as HTMLElement | null
+    return el?.scrollTop ?? 0
+  }
+  if (!pdfPaneEl.hidden) return pdfViewEl.scrollTop
+  if (!imagePaneEl.hidden) return imageStageEl.scrollTop
+  if (!textPaneEl.hidden) {
+    const el = textMountEl.querySelector('.cm-scroller') as HTMLElement | null
+    return el?.scrollTop ?? 0
+  }
+  return undefined
+}
+
+function restoreActiveScroll(top: number | undefined): void {
+  if (top === undefined || top <= 0) return
+  if (!pageViewEl.hidden) {
+    const el = pageViewEl.querySelector('.page-scroll') as HTMLElement | null
+    if (el) el.scrollTop = top
+  } else if (!pdfPaneEl.hidden) {
+    pdfViewEl.scrollTop = top
+  } else if (!imagePaneEl.hidden) {
+    imageStageEl.scrollTop = top
+  } else if (!textPaneEl.hidden) {
+    const el = textMountEl.querySelector('.cm-scroller') as HTMLElement | null
+    if (el) el.scrollTop = top
+  }
+}
+
+async function activateTab(i: number): Promise<void> {
+  const tab = tabs[i]
+  if (!tab) return
+  // Remember where the tab we are leaving was scrolled to, before activeTab
+  // moves on to the incoming one.
+  if (i !== activeTab) captureScrollForShownContent()
+  activeTab = i
+  renderTabs()
+  persistTabs()
+  await loadTabContent(tab)
+}
+
+// Scroll positions per page/file, so switching tabs — or coming back to a page
+// from the tree — lands where the user left off.
+const scrollMemory = new Map<string, number>()
+
+/** Rel path of whatever the visible pane is showing right now. */
+function shownRelPath(): string | null {
+  if (!pageViewEl.hidden) return currentPage?.relPath ?? null
+  if (!pdfPaneEl.hidden) return currentPdfPath
+  if (!imagePaneEl.hidden) return currentImagePath
+  if (!textPaneEl.hidden) return currentFile?.relPath ?? null
+  return null
+}
+
+/** Park the scroll position of whatever is on screen. */
+function captureScrollForShownContent(): void {
+  const pos = captureActiveScroll()
+  if (pos === undefined) return // nothing visible (boot, empty state)
+  const rel = shownRelPath()
+  if (!rel) return
+  scrollMemory.set(rel, pos)
+  const tab = tabs.find((t) => t.relPath === rel)
+  if (tab) tab.scrollTop = pos
+}
+
+function scrollForTab(tab: TabInfo): number | undefined {
+  return scrollMemory.get(tab.relPath) ?? tab.scrollTop
+}
+
+async function loadTabContent(tab: TabInfo): Promise<void> {
+  recordNav({ rel: tab.relPath, kind: tab.kind, title: tab.title })
+  try {
+    if (tab.kind === 'pdf') await openPdf(tab.relPath, { tab: false })
+    else if (tab.kind === 'image') await openImage(tab.relPath, { tab: false })
+    else if (tab.kind === 'file' || tab.kind === 'binary') await openTextFile(tab.relPath, { tab: false })
+    else await openPageByRel(tab.relPath)
+  } catch (err) {
+    // A tab that can't be loaded must not wedge the app: report it and leave
+    // the loader hidden rather than spinning forever.
+    console.warn('tab load failed', tab.kind, err)
+    pageLoaderEl.hidden = true
+  }
+  restoreActiveScroll(scrollForTab(tab))
+}
+
+function closeTab(i: number): void {
+  if (i < 0 || i >= tabs.length) return
+  if (i !== activeTab) captureScrollForShownContent()
+  tabs.splice(i, 1)
+  if (tabs.length === 0) {
+    activeTab = 0
+    renderTabs()
+    persistTabs()
+    showNoTabs()
+    return
+  }
+  if (activeTab >= tabs.length) activeTab = tabs.length - 1
+  else if (i < activeTab) activeTab--
+  renderTabs()
+  persistTabs()
+  void activateTab(activeTab)
+}
+
+function showNoTabs(): void {
+  currentPage = null
+  currentFile = null
+  currentImagePath = null
+  currentPdfPath = null
+  pdfHandle?.destroy()
+  pdfHandle = null
+  pageViewEl.hidden = true
+  pdfPaneEl.hidden = true
+  imagePaneEl.hidden = true
+  textPaneEl.hidden = true
+  welcomeEl.hidden = true
+  pageLoaderEl.hidden = true
+  emptyStateEl.hidden = false
+  breadcrumbsEl.innerHTML = ''
+}
+
+// Open a page/PDF/file, reusing an existing tab unless asked for a new one.
+async function openRel(relIn: string, kind: string, newTab = false): Promise<void> {
+  const rel = await normalizeRel(relIn)
+  const existing = tabIndexFor(rel)
+  if (existing >= 0 && !newTab) {
+    if (existing !== activeTab) captureScrollForShownContent()
+    activeTab = existing
+    renderTabs()
+    persistTabs()
+    await loadTabContent(tabs[existing])
+    return
+  }
+  const displayKind = (kind === 'binary' ? 'binary' : kind) as TabInfo['kind']
+  const info: TabInfo = { relPath: rel, kind: displayKind, title: rel.split('/').filter(Boolean).pop() ?? rel }
+  if (kind === 'page') {
+    const page = await window.api.wsRead(rel)
+    if (page) {
+      info.title = page.title
+      info.icon = page.icon
+    }
+  }
+  if (newTab) {
+    captureScrollForShownContent()
+    tabs.push(info)
+    activeTab = tabs.length - 1
+    renderTabs()
+    persistTabs()
+  } else {
+    upsertActiveTab(info)
+  }
+  await loadTabContent(info)
+}
+
+// The page title/icon change → keep the tab label in sync.
+function refreshActiveTabLabel(title: string, icon: string): void {
+  const tab = tabs[activeTab]
+  if (!tab) return
+  tab.title = title
+  tab.icon = icon
+  renderTabs()
+  persistTabs()
+}
+
+async function restoreTabs(): Promise<void> {
+  const saved = ((await window.api.getSettings('openTabs')) as TabInfo[] | undefined) ?? []
+  const savedActive = ((await window.api.getSettings('activeTab')) as number | undefined) ?? 0
+  const info = await window.api.wsGet()
+  if (!info.workspace || saved.length === 0) {
+    renderTabs()
+    return
+  }
+  const candidates = saved.filter((t) => t && typeof t.relPath === 'string')
+  // Drop tabs whose file disappeared while the app was closed, so a stale
+  // entry can't strand the window on an empty view.
+  tabs = []
+  for (const t of candidates) {
+    try {
+      const kind = await window.api.fileKind(t.relPath)
+      if (t.kind === 'page') {
+        const page = await window.api.wsRead(t.relPath)
+        if (page) tabs.push(t)
+        continue
+      }
+      if (!kind) continue
+      tabs.push({ ...t, kind: kind === 'image' ? 'image' : t.kind })
+    } catch {
+      /* skip unreadable tab */
+    }
+  }
+  if (tabs.length === 0) {
+    renderTabs()
+    return
+  }
+  activeTab = Math.max(0, Math.min(savedActive, tabs.length - 1))
+  renderTabs()
+  await loadTabContent(tabs[activeTab])
+}
+
+async function newTab(): Promise<void> {
+  const pages = await window.api.wsAllPages()
+  const pop = document.createElement('div')
+  pop.className = 'tab-picker'
+  const input = document.createElement('input')
+  input.className = 'tab-picker-input'
+  input.placeholder = 'Open a page in a new tab…'
+  const list = document.createElement('div')
+  list.className = 'tab-picker-list'
+  pop.append(input, list)
+  document.body.appendChild(pop)
+  const rect = tabBarEl.getBoundingClientRect()
+  pop.style.left = Math.round(rect.left + 8) + 'px'
+  pop.style.top = Math.round(rect.bottom + 4) + 'px'
+  const draw = (): void => {
+    const q = input.value.trim().toLowerCase()
+    list.innerHTML = ''
+    const matches = pages.filter((p) => !q || p.title.toLowerCase().includes(q) || p.relPath.toLowerCase().includes(q)).slice(0, 40)
+    for (const p of matches) {
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'tab-picker-item'
+      row.textContent = (p.icon ? p.icon + '  ' : '') + p.title
+      row.addEventListener('click', () => {
+        pop.remove()
+        void openRel(p.relPath, 'page', true)
+      })
+      list.appendChild(row)
+    }
+    if (matches.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'tab-picker-empty'
+      empty.textContent = 'No pages match'
+      list.appendChild(empty)
+    }
+  }
+  input.addEventListener('input', draw)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      pop.remove()
+      return
+    }
+    if (e.key === 'Enter') {
+      const first = list.querySelector('.tab-picker-item') as HTMLElement | null
+      first?.click()
+    }
+  })
+  const outside = (e: MouseEvent): void => {
+    if (!pop.contains(e.target as Node)) {
+      pop.remove()
+      document.removeEventListener('mousedown', outside)
+    }
+  }
+  window.setTimeout(() => document.addEventListener('mousedown', outside), 0)
+  draw()
+  input.focus()
+}
+
+// ---- built-in plaintext viewer for non-page files (.txt, .py, .dxf, …) ----
+const textPaneEl = document.getElementById('text-pane') as HTMLElement
+const textMountEl = document.getElementById('text-mount') as HTMLElement
+const textNameEl = document.getElementById('text-name') as HTMLElement
+const textIconEl = document.getElementById('text-icon') as HTMLElement
+const textStatusEl = document.getElementById('text-status') as HTMLElement
+let currentFile: { relPath: string; absolutePath: string } | null = null
+let currentPdfPath: string | null = null
+let textEditor: MarkdownEditor | null = null
+let fileSaveTimer: number | null = null
+let fileDirty = false
+
+function setFileStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): void {
+  textStatusEl.textContent = text
+  textStatusEl.classList.toggle('ok', kind === 'ok')
+  textStatusEl.classList.toggle('pending', kind === 'pending')
+  textStatusEl.classList.toggle('error', kind === 'error')
+}
+
+function fileIconFor(relPath: string): string {
+  const ext = (relPath.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase()
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'].includes(ext)) return '🖼'
+  if (['py', 'js', 'ts', 'tsx', 'jsx', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh', 'lua', 'php', 'sql'].includes(ext)) return '⌨️'
+  if (['json', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'csv', 'tsv'].includes(ext)) return '🧾'
+  if (['dxf', 'dwg', 'stl', 'obj'].includes(ext)) return '📐'
+  return '📄'
+}
+
+async function flushTextFile(): Promise<void> {
+  if (!currentFile || !textEditor || !fileDirty) return
+  if (fileSaveTimer !== null) {
+    window.clearTimeout(fileSaveTimer)
+    fileSaveTimer = null
+  }
+  const rel = currentFile.relPath
+  const ok = await window.api.writeTextFile(rel, textEditor.getContent())
+  if (currentFile?.relPath !== rel) return
+  fileDirty = false
+  setFileStatus(
+    ok ? 'Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Save failed',
+    ok ? 'ok' : 'error'
+  )
+  if (ok) window.setTimeout(() => void refreshTree(), 80)
+}
+
+async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
+  recordNav({ rel: pathOrRel, kind: 'file', title: pathOrRel })
+  if (fileDirty) await flushTextFile()
+  const res = await window.api.readTextFile(pathOrRel)
+  if (!res) return
+  const pathOrRel2 = pathOrRel
+  currentPage = null
+  releasePdfViewer()
+  currentFile = { relPath: pathOrRel2, absolutePath: res.absolutePath }
+  pageViewEl.hidden = true
+  pdfPaneEl.hidden = true
+  imagePaneEl.hidden = true
+  emptyStateEl.hidden = true
+  welcomeEl.hidden = true
+  pageLoaderEl.hidden = true
+  textPaneEl.hidden = false
+  const name = pathOrRel.split('/').pop() ?? pathOrRel
+  textNameEl.textContent = name
+  textNameEl.title = res.absolutePath
+  textIconEl.textContent = fileIconFor(pathOrRel)
+  if (!textEditor) {
+    textEditor = createEditor(textMountEl, '', getTheme(themeId).kind, () => {
+      fileDirty = true
+      setFileStatus('Unsaved…', 'pending')
+      if (fileSaveTimer !== null) window.clearTimeout(fileSaveTimer)
+      fileSaveTimer = window.setTimeout(() => void flushTextFile(), 1200)
+    })
+  } else {
+    textEditor.setTheme(getTheme(themeId).kind)
+  }
+  textEditor.setContent(res.content)
+  fileDirty = false
+  setFileStatus('')
+  breadcrumbsEl.innerHTML = ''
+  const crumb = document.createElement('span')
+  crumb.className = 'crumb'
+  crumb.textContent = name
+  breadcrumbsEl.appendChild(crumb)
+  ;(document.getElementById('page-tree') as HTMLElement).dataset.currentRel = pathOrRel
+  if (opts.tab !== false) upsertActiveTab({ relPath: pathOrRel, kind: 'file', title: name })
+  await refreshTree()
+}
+
+// Any in-page file reference (📎 chips, [text](file.pdf) links) opens in the
+// built-in viewers when the file lives in the workspace.
+async function openFileRef(absolutePath: string): Promise<void> {
+  // Workspace-relative or absolute — both open in the built-in viewers; only
+  // genuinely binary files go to the system app.
+  const kind = await window.api.fileKind(absolutePath)
+  if (kind === 'pdf') await openPdf(absolutePath)
+  else if (kind === 'image') await openImage(absolutePath)
+  else if (kind === 'text') await openTextFile(absolutePath)
+  else await window.api.openPath(absolutePath)
+}
+
+async function openBinaryFile(relPath: string): Promise<void> {
+  const info = await window.api.wsGet()
+  if (!info.workspace) return
+  const abs = relPath.startsWith('/') ? relPath : info.workspace + '/' + relPath
+  const kind = await window.api.fileKind(abs)
+  if (kind === 'image') return openImage(abs)
+  if (kind === 'pdf') return openPdf(abs)
+  if (kind === 'text') return openTextFile(abs)
+  await window.api.openPath(abs)
+}
+
+let pdfHandle: PdfViewerHandle | null = null
+
+// Tear the pdf.js document down (canvas memory is significant) whenever we
+// leave the PDF pane; it's recreated on the next open.
+function releasePdfViewer(): void {
+  if (!pdfHandle) {
+    pdfViewEl.innerHTML = ''
+    return
+  }
+  try {
+    pdfHandle.destroy()
+  } catch {
+    /* already gone */
+  }
+  pdfHandle = null
+  pdfViewEl.innerHTML = ''
+}
+
+async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
+  recordNav({ rel: pathOrRel, kind: 'pdf', title: pathOrRel })
+  if (fileDirty) await flushTextFile()
+  if (dirty && saveTimer !== null) {
+    window.clearTimeout(saveTimer)
+    saveTimer = null
+    await persistNow()
+  }
+  const info = await window.api.wsGet()
+  const abs = pathOrRel.startsWith('/')
+    ? pathOrRel
+    : info.workspace
+      ? info.workspace + '/' + pathOrRel
+      : pathOrRel
+  const name = pathOrRel.split('/').pop() ?? pathOrRel
+  const pdfNameEl = document.getElementById('pdf-name')
+  if (pdfNameEl) {
+    pdfNameEl.textContent = name
+    pdfNameEl.title = abs
+  }
+  currentPdfPath = abs
+  currentImagePath = null
+  if (opts.tab !== false) {
+    const rel = await normalizeRel(pathOrRel)
+    upsertActiveTab({ relPath: rel, kind: 'pdf', title: name })
+  }
+  currentPage = null
+  currentFile = null
+  textPaneEl.hidden = true
+  imagePaneEl.hidden = true
+  pageViewEl.hidden = true
+  emptyStateEl.hidden = true
+  pdfPaneEl.hidden = false
+  breadcrumbsEl.innerHTML = ''
+  const crumb = document.createElement('span')
+  crumb.className = 'crumb'
+  crumb.textContent = '📕 ' + name
+  breadcrumbsEl.appendChild(crumb)
+
+  pdfHandle?.destroy()
+  pdfHandle = null
+  pdfViewEl.scrollTop = 0
+  pdfViewEl.innerHTML = '<div class="pdf-loading">Loading PDF…</div>'
+  const bytes = await window.api.readBytes(abs)
+  if (!bytes || bytes.byteLength === 0) {
+    pdfViewEl.innerHTML = '<div class="pdf-loading">Could not read this PDF.</div>'
+    return
+  }
+  try {
+    const handle = await createPdfViewer({
+      container: pdfViewEl,
+      bytes,
+      onState: (s) => {
+        const label = document.getElementById('pdf-zoom-label')
+        if (label) label.textContent = Math.round(s.scale * 100) + '%'
+        const pages = document.getElementById('pdf-pages')
+        if (pages) pages.textContent = s.pages > 1 ? 'page ' + s.page + ' / ' + s.pages : '1 page'
+      }
+    })
+    pdfHandle = handle
+    pdfViewEl.scrollTop = 0
+  } catch (err) {
+    pdfViewEl.innerHTML =
+      '<div class="pdf-loading">Could not display this PDF.<br><span class="muted">' +
+      String(err instanceof Error ? err.message : err).slice(0, 200) +
+      '</span></div>'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// In-app image viewer: any png/jpg/gif/webp/svg in the workspace (or referenced
+// from a page) opens here instead of being handed to Preview.
+// ---------------------------------------------------------------------------
+let currentImagePath: string | null = null
+let imageZoom = 1
+let imageNatural = { w: 0, h: 0 }
+
+function applyImageZoom(): void {
+  imageViewEl.style.width = Math.round(imageNatural.w * imageZoom) + 'px'
+  const label = document.getElementById('image-zoom-label')
+  if (label) label.textContent = Math.round(imageZoom * 100) + '%'
+}
+
+function fitImage(): void {
+  if (!imageNatural.w) return
+  const avail = Math.max(120, imageStageEl.clientWidth - 48)
+  imageZoom = Math.min(1, avail / imageNatural.w)
+  applyImageZoom()
+}
+
+async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
+  recordNav({ rel: pathOrRel, kind: 'image', title: pathOrRel })
+  if (fileDirty) await flushTextFile()
+  if (dirty && saveTimer !== null) {
+    window.clearTimeout(saveTimer)
+    saveTimer = null
+    await persistNow()
+  }
+  const info = await window.api.wsGet()
+  const abs = pathOrRel.startsWith('/')
+    ? pathOrRel
+    : info.workspace
+      ? info.workspace + '/' + pathOrRel
+      : pathOrRel
+  const res = await window.api.readImage(abs)
+  if (!res) {
+    await window.api.openPath(abs)
+    return
+  }
+  const name = res.name
+  currentImagePath = abs
+  currentPdfPath = null
+  if (opts.tab !== false) {
+    const rel = await normalizeRel(pathOrRel)
+    upsertActiveTab({ relPath: rel, kind: 'image', title: name })
+  }
+  currentPage = null
+  currentFile = null
+  releasePdfViewer()
+  pdfPaneEl.hidden = true
+  textPaneEl.hidden = true
+  pageViewEl.hidden = true
+  emptyStateEl.hidden = true
+  imagePaneEl.hidden = false
+  const nameEl = document.getElementById('image-name')
+  if (nameEl) {
+    nameEl.textContent = name
+    nameEl.title = abs
+  }
+  breadcrumbsEl.innerHTML = ''
+  const crumb = document.createElement('span')
+  crumb.className = 'crumb'
+  crumb.textContent = '🖼 ' + name
+  breadcrumbsEl.appendChild(crumb)
+  imageViewEl.src = 'data:' + res.mimeType + ';base64,' + res.data
+  await new Promise<void>((resolve) => {
+    if (imageViewEl.complete && imageViewEl.naturalWidth > 0) return resolve()
+    imageViewEl.onload = () => resolve()
+    imageViewEl.onerror = () => resolve()
+    window.setTimeout(resolve, 4000)
+  })
+  imageNatural = { w: imageViewEl.naturalWidth || 800, h: imageViewEl.naturalHeight || 600 }
+  fitImage()
+  imageStageEl.scrollTo({ top: 0, left: 0 })
+}
+
+function toggleSource(): void {
+  if (!currentPage) return
+  viewMode = viewMode === 'rich' ? 'split' : viewMode === 'split' ? 'source' : 'rich'
+  applyViewMode()
+}
+
+function applyViewMode(): void {
+  const split = viewMode === 'split'
+  const source = viewMode === 'source'
+  // Capture the live document from whichever surface the user was editing
+  // BEFORE flipping modes. (Switching used to sync the wrong direction, so
+  // edits made in the plain-text pane were silently reverted by the rich
+  // editor's copy when you switched back.)
+  const body = getActiveBody()
+  sourceMode = source
+  editorMount.hidden = source
+  codeMount.hidden = !split && !source
+  ;(document.querySelector('.page-scroll') as HTMLElement).classList.toggle('split-view', split)
+  toggleSourceBtn.textContent = viewMode === 'rich' ? 'Split' : viewMode === 'split' ? 'Source' : 'Rich text'
+  programmatic = true
+  try {
+    if (split) {
+      // Both surfaces get the same document, then stay live-synced.
+      richEditor.setContent(body)
+      codeEditor.setContent(body)
+    } else if (source) {
+      codeEditor.setContent(body)
+    } else {
+      richEditor.setContent(body)
+    }
+  } finally {
+    programmatic = false
+  }
+  if (split) {
+    lastFocused = 'code'
+    codeEditor.view.focus()
+  } else if (source) {
+    codeEditor.view.focus()
+  } else {
+    richEditor.focus()
+  }
+  scheduleSave()
+}
+
+// ---- split view live sync ----
+let viewMode: 'rich' | 'split' | 'source' = 'rich'
+let lastFocused: 'rich' | 'code' | null = null
+let splitBusy = false
+let splitTimer: number | null = null
+
+function scheduleSplitSync(): void {
+  if (viewMode !== 'split' || splitBusy) return
+  if (splitTimer !== null) window.clearTimeout(splitTimer)
+  splitTimer = window.setTimeout(() => {
+    splitTimer = null
+    if (viewMode !== 'split') return
+    splitBusy = true
+    programmatic = true
+    try {
+      if (lastFocused === 'code') richEditor.setContent(codeEditor.getContent())
+      else codeEditor.setContent(richEditor.getMarkdown())
+    } finally {
+      programmatic = false
+      splitBusy = false
+    }
+  }, 350)
+}
+
+// ---- sidebar ----
+let lastRoot: SidebarNodeLike | null = null
+
+interface SidebarNodeLike {
+  name: string
+  relPath: string
+  dirRel?: string
+  kind: 'page' | 'folder' | 'pdf' | 'file' | 'binary'
+  title?: string
+  icon?: string
+  children?: SidebarNodeLike[]
+}
+
+function findNodeByDirRel(node: SidebarNodeLike, dirRel: string): SidebarNodeLike | null {
+  if ((node.dirRel ?? '') === dirRel && (node.kind === 'page' || node.kind === 'folder')) return node
+  for (const c of node.children ?? []) {
+    const found = findNodeByDirRel(c, dirRel)
+    if (found) return found
+  }
+  return null
+}
+
+function findNodeByRel(node: SidebarNodeLike, relPath: string): SidebarNodeLike | null {
+  if (node.relPath === relPath) return node
+  for (const c of node.children ?? []) {
+    const found = findNodeByRel(c, relPath)
+    if (found) return found
+  }
+  return null
+}
+
+function findParentOf(node: SidebarNodeLike, target: SidebarNodeLike): SidebarNodeLike | null {
+  for (const c of node.children ?? []) {
+    if (c === target || c.relPath === target.relPath) return node
+    const found = findParentOf(c, target)
+    if (found) return found
+  }
+  return null
+}
+
+async function refreshTree(): Promise<void> {
+  const tree = await window.api.wsTree()
+  lastRoot = tree
+  setupSidebar(tree, {
+    currentRel: currentPage?.relPath ?? null,
+    onOpen: (rel, kind, newTab) => {
+      // With the second pane active, navigation lands there (that is the page
+      // the user is working on).
+      if (splitOpen && activePane === 'right' && !newTab) {
+        void setSplitTarget(rel, kind)
+        return
+      }
+      if (kind === 'pdf') void openPdf(rel)
+      else void openPageByRel(rel)
+    }
+  })
+}
+
+// ---- theme / fonts ----
+let themeId = 'light'
+function syncThemeSelect(): void {
+  const el = document.getElementById('theme-select') as HTMLSelectElement | null
+  if (el) el.value = themeId
+}
+
+function setTheme(id: string): void {
+  themeId = id
+  const theme = applyTheme(id)
+  codeEditor.setTheme(theme.kind)
+  textEditor?.setTheme(theme.kind)
+  syncThemeSelect()
+  void window.api.setSettings('theme', id)
+}
+function cycleTheme(): void {
+  setTheme(nextTheme(themeId).id)
+}
+
+// Boot: restore the saved theme (was never applied on startup before).
+void (async () => {
+  const saved = ((await window.api.getSettings('theme')) as string | undefined) ?? 'light'
+  themeId = saved
+  const theme = applyTheme(saved)
+  codeEditor.setTheme(theme.kind)
+  syncThemeSelect()
+})()
+let currentPreviewFontId = 'default'
+
+function applyPreviewFont(id: string): void {
+  const font = fontById(id)
+  currentPreviewFontId = font.id
+  document.documentElement.style.setProperty('--preview-font', font.family)
+  void window.api.setSettings('previewFont', id)
+}
+
+/**
+ * Font stack used for the PDF. macOS's sans-serif CJK fallback is PingFang SC,
+ * and Chromium cannot embed that font in a PDF — every CJK glyph was silently
+ * dropped, so Chinese/Japanese/Korean text vanished from exports while Latin
+ * text stayed. Naming an embeddable CJK family before any generic fixes it.
+ */
+function updatePrintFont(): void {
+  const font = fontById(currentPreviewFontId)
+  const withoutGeneric = font.family.replace(/,\s*(sans-serif|serif|monospace)\s*$/i, '')
+  // PingFang is the macOS sans fallback for CJK and Chromium cannot embed that
+  // .ttc in a PDF — naming it (directly or as a fallback) silently dropped every
+  // CJK glyph from exports. Drop it here; the embeddable families below cover
+  // Chinese/Japanese/Korean instead.
+  const printable = withoutGeneric.replace(/'PingFang[^']*'|PingFang\s+[A-Z]{2}(?=,|$)/gi, '')
+  document.documentElement.style.setProperty(
+    '--print-font',
+    `${printable}, 'Arial Unicode MS', 'Songti SC', 'Heiti SC', 'Hiragino Sans GB', serif`
+  )
+}
+
+// ---- icon picker ----
+// Full emoji picker with search (all 1791 stickers).
+const emojiPicker = document.getElementById('emoji-picker') as HTMLElement
+let emojiGrid: HTMLElement | null = null
+let emojiInput: HTMLInputElement | null = null
+
+function pickIcon(icon: string): void {
+  if (currentPage) {
+    currentPage.icon = icon
+    pageIconEl.textContent = icon
+    pageIconEl.classList.toggle('no-icon', !icon)
+    scheduleSave()
+    queueTreeRefresh()
+  }
+  emojiPicker.hidden = true
+}
+
+let emojiShown = 0
+const EMOJI_PAGE = 600
+
+function renderEmojis(): void {
+  if (!emojiGrid || !emojiInput) return
+  const q = emojiInput.value.trim().toLowerCase()
+  let matches = q ? EMOJI_LIST.filter((e) => emojiMatches(e, q)) : EMOJI_LIST
+  if (!q && emojiTab !== 'all') {
+    const gi = EMOJI_GROUPS.findIndex((g) => g.id === emojiTab)
+    matches = matches.filter((e) => e.g === gi)
+  }
+  emojiShown = emojiShown || EMOJI_PAGE
+  emojiShown = Math.min(emojiShown, Math.max(EMOJI_PAGE, matches.length) || EMOJI_PAGE)
+  emojiGrid.innerHTML = ''
+  const noneBtn = document.createElement('button')
+  noneBtn.type = 'button'
+  noneBtn.className = 'emoji-none-btn'
+  noneBtn.textContent = '🚫 No icon'
+  noneBtn.addEventListener('click', () => pickIcon(''))
+  emojiGrid.appendChild(noneBtn)
+  const shown = matches.slice(0, emojiShown)
+  for (const e of shown) {
+    const cell = document.createElement('button')
+    cell.type = 'button'
+    cell.title = e.n
+    cell.textContent = e.c
+    cell.addEventListener('click', () => pickIcon(e.c))
+    emojiGrid.appendChild(cell)
+  }
+  const more = document.createElement('button')
+  more.type = 'button'
+  more.className = 'emoji-more-btn'
+  if (matches.length > emojiShown) {
+    more.textContent = `Show more (${matches.length - emojiShown} more)`
+    more.addEventListener('click', () => {
+      emojiShown = Math.min(emojiShown + EMOJI_PAGE, matches.length || EMOJI_LIST.length)
+      renderEmojis()
+    })
+  } else if (matches.length === 0) {
+    more.textContent = 'No emoji match'
+    more.disabled = true
+  }
+  emojiGrid.appendChild(more)
+}
+
+const EMOJI_TABS: string[] = ['all', ...EMOJI_GROUPS.map((g) => g.id)]
+let emojiTab = 'all'
+let emojiTabsEl: HTMLElement | null = null
+
+function emojiMatches(e: { n: string; k: string }, q: string): boolean {
+  const hay = (e.n + ' ' + e.k).toLowerCase()
+  return q.split(/\s+/).every((tok) => hay.includes(tok))
+}
+
+function buildEmojiPicker(): void {
+  emojiPicker.innerHTML = ''
+  emojiInput = document.createElement('input')
+  emojiInput.className = 'emoji-search'
+  emojiInput.placeholder = 'Search emoji…'
+  emojiTabsEl = document.createElement('div')
+  emojiTabsEl.className = 'emoji-tabs'
+  for (const id of EMOJI_TABS) {
+    const tab = document.createElement('button')
+    tab.type = 'button'
+    tab.className = 'emoji-tab' + (id === emojiTab ? ' active' : '')
+    tab.textContent = id === 'all' ? '✨ All' : (EMOJI_GROUPS.find((g) => g.id === id)?.label ?? id)
+    tab.addEventListener('click', () => {
+      emojiTab = id
+      emojiShown = 0
+      emojiTabsEl?.querySelectorAll('.emoji-tab').forEach((t) => t.classList.toggle('active', t === tab))
+      renderEmojis()
+    })
+    emojiTabsEl.appendChild(tab)
+  }
+  emojiGrid = document.createElement('div')
+  emojiGrid.className = 'emoji-grid'
+  emojiPicker.append(emojiInput, emojiTabsEl, emojiGrid)
+  emojiInput.addEventListener('input', renderEmojis)
+  renderEmojis()
+}
+
+pageIconEl.addEventListener('click', () => {
+  const rect = pageIconEl.getBoundingClientRect()
+  emojiPicker.hidden = !emojiPicker.hidden
+  if (!emojiPicker.hidden) {
+    if (!emojiGrid) buildEmojiPicker()
+    emojiPicker.style.left = rect.left + 'px'
+    emojiPicker.style.top = rect.bottom + 6 + 'px'
+    emojiInput?.focus()
+  }
+})
+
+document.addEventListener('mousedown', (e) => {
+  if (!emojiPicker.hidden && !emojiPicker.contains(e.target as Node) && e.target !== pageIconEl) emojiPicker.hidden = true
+})
+
+// ---- Export to PDF ----
+
+// Export options: margins + whether the page title/icon are printed. They live
+// in the popover next to the PDF button and are remembered between runs.
+type ExportMargin = 'thin' | 'medium' | 'wide'
+let exportMargin: ExportMargin = 'medium'
+let exportIncludeTitle = true
+let exportIncludeIcon = true
+
+function applyExportMenuState(): void {
+  // Margin buttons live both in the export popover and in the page Display
+  // menu; keep every copy in sync.
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('.export-seg-btn[data-margin]')) {
+    btn.classList.toggle('on', btn.dataset.margin === exportMargin)
+  }
+  const titleBox = document.getElementById('export-title') as HTMLInputElement | null
+  const iconBox = document.getElementById('export-icon') as HTMLInputElement | null
+  if (titleBox) titleBox.checked = exportIncludeTitle
+  if (iconBox) iconBox.checked = exportIncludeIcon
+}
+
+function closeExportMenu(): void {
+  const menu = document.getElementById('export-menu')
+  if (menu) menu.hidden = true
+}
+
+function toggleExportMenu(): void {
+  const menu = document.getElementById('export-menu')
+  if (!menu) return
+  if (menu.hidden) {
+    applyExportMenuState()
+    menu.hidden = false
+  } else {
+    closeExportMenu()
+  }
+}
+
+async function exportPageToPdf(): Promise<void> {
+  if (!currentPage) return
+  closeExportMenu()
+  // Print options are read by the print stylesheet from <html>.
+  document.documentElement.dataset.printTitle = exportIncludeTitle ? 'on' : 'off'
+  document.documentElement.dataset.printIcon = exportIncludeIcon ? 'on' : 'off'
+  // The PDF is produced by printing this window (see the main process), so make
+  // sure the rich editor shows the latest text even if the user is in
+  // source/split mode, and let print CSS hide the app chrome.
+  const body = getActiveBody()
+  programmatic = true
+  try {
+    richEditor.setContent(body)
+  } finally {
+    programmatic = false
+  }
+  updatePrintFont()
+  document.body.classList.add('exporting-page')
+  setSaveStatus('Exporting PDF…', 'pending')
+  try {
+    const res = await window.api.exportPagePdf({
+      title: currentPage.title,
+      relPath: currentPage.relPath,
+      margins: exportMargin
+    })
+    if (res?.path) {
+      setSaveStatus(`PDF saved · ${res.pages} page${res.pages === 1 ? '' : 's'}`, 'ok')
+      logLine('info', `exported pdf: ${res.pages} pages, margins=${exportMargin}`)
+    } else {
+      setSaveStatus('Export canceled', 'ok')
+    }
+  } catch (err) {
+    setSaveStatus('PDF export failed', 'error')
+    console.error(err)
+  } finally {
+    document.body.classList.remove('exporting-page')
+  }
+  window.setTimeout(() => setSaveStatus(''), 4000)
+}
+
+let treeRefreshTimer: number | null = null
+function queueTreeRefresh(): void {
+  if (treeRefreshTimer !== null) window.clearTimeout(treeRefreshTimer)
+  treeRefreshTimer = window.setTimeout(() => {
+    treeRefreshTimer = null
+    void refreshTree()
+  }, 700)
+}
+
+let crumbPop: HTMLElement | null = null
+function closeCrumbPop(): void {
+  if (crumbPop) {
+    crumbPop.remove()
+    crumbPop = null
+  }
+}
+document.addEventListener('mousedown', (e) => {
+  if (crumbPop && !crumbPop.contains(e.target as Node)) closeCrumbPop()
+})
+
+// Notion-style: clicking a crumb opens a dropdown of its siblings (the
+// children of its parent), with drill-down chevrons for pages that have kids.
+function showCrumbPop(anchor: HTMLElement, node: SidebarNodeLike): void {
+  closeCrumbPop()
+  if (!lastRoot) return
+  const parent = findParentOf(lastRoot, node) ?? lastRoot
+  const rows = (parent.children ?? []).filter((c) => c.kind !== 'pdf' || true)
+  crumbPop = document.createElement('div')
+  crumbPop.className = 'crumb-pop'
+  const renderRows = (list: SidebarNodeLike[], highlightRel: string | null): void => {
+    if (!crumbPop) return
+    crumbPop.innerHTML = ''
+    for (const child of list) {
+      const row = document.createElement('div')
+      row.className = 'crumb-pop-item' + (child.relPath === highlightRel ? ' active' : '')
+      const icon = document.createElement('span')
+      icon.className = 'crumb-pop-icon'
+      icon.textContent = child.icon ?? (child.kind === 'pdf' ? '📕' : '')
+      const label = document.createElement('span')
+      label.className = 'crumb-pop-label'
+      label.textContent = child.title ?? child.name
+      row.append(icon, label)
+      const hasKids = (child.children ?? []).length > 0
+      if (hasKids) {
+        const chev = document.createElement('button')
+        chev.className = 'crumb-pop-chev'
+        chev.title = 'Show subpages'
+        chev.addEventListener('click', (e) => {
+          e.stopPropagation()
+          renderRows(child.children ?? [], child.relPath)
+        })
+        row.appendChild(chev)
+      }
+      row.addEventListener('click', () => {
+        closeCrumbPop()
+        if (child.kind === 'pdf') void openPdf(child.relPath)
+        else void openPageByRel(child.relPath)
+      })
+      crumbPop.appendChild(row)
+    }
+    if (list.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'crumb-pop-empty'
+      empty.textContent = 'No pages here yet'
+      crumbPop.appendChild(empty)
+    }
+  }
+  renderRows(rows, node.relPath)
+  document.body.appendChild(crumbPop)
+  const rect = anchor.getBoundingClientRect()
+  crumbPop.style.left = rect.left + 'px'
+  crumbPop.style.top = rect.bottom + 6 + 'px'
+}
+
+function renderBreadcrumbs(): void {
+  if (splitOpen && activePane === 'right' && splitRel) {
+    const parts = splitRel.split('/').filter((p) => p !== 'index.md')
+    breadcrumbsEl.innerHTML = ''
+    parts.forEach((part, i) => {
+      const crumb = document.createElement('span')
+      crumb.className = 'crumb' + (i === parts.length - 1 ? ' current' : '')
+      crumb.textContent = part
+      if (i < parts.length - 1) crumb.textContent += ' /'
+      breadcrumbsEl.appendChild(crumb)
+    })
+    return
+  }
+  breadcrumbsEl.innerHTML = ''
+  if (!currentPage || !lastRoot) return
+  // Chain of directories from root to the current page's folder.
+  const dirs: string[] = ['']
+  if (currentPage.relPath.endsWith('/index.md')) {
+    const dir = currentPage.dirRel
+    if (dir) {
+      const parts = dir.split('/')
+      for (let i = 1; i <= parts.length; i++) dirs.push(parts.slice(0, i).join('/'))
+    }
+  }
+  dirs.forEach((dir, i) => {
+    const node = findNodeByDirRel(lastRoot!, dir)
+    const btn = document.createElement('button')
+    btn.className = 'crumb-btn'
+    const isCurrentDir = dir === currentPage!.dirRel && currentPage!.relPath.endsWith('/index.md')
+    if (node && !(dir === '' && node.kind === 'folder' && !node.title)) {
+      btn.textContent = (node.icon ?? '') + (node.icon ? '  ' : '') + (node.title ?? node.name)
+    } else if (dir === '') {
+      btn.textContent = '  ' + (document.getElementById('workspace-name') as HTMLElement).textContent
+    }
+    if (isCurrentDir && !currentPage!.relPath.endsWith('/index.md')) btn.classList.add('dim')
+    btn.addEventListener('click', () => {
+      if (node) showCrumbPop(btn, node)
+    })
+    breadcrumbsEl.appendChild(btn)
+    if (i < dirs.length - 1 || !currentPage!.relPath.endsWith('/index.md')) {
+      const sep = document.createElement('span')
+      sep.className = 'crumb-sep'
+      sep.textContent = '/'
+      breadcrumbsEl.appendChild(sep)
+    }
+  })
+  // Loose page: append itself as the final crumb.
+  if (!currentPage.relPath.endsWith('/index.md')) {
+    const btn = document.createElement('button')
+    btn.className = 'crumb-btn current'
+    btn.textContent = (currentPage.icon ?? '') + (currentPage.icon ? '  ' : '') + currentPage.title
+    btn.addEventListener('click', () => {
+      const node = lastRoot ? findNodeByRel(lastRoot, currentPage!.relPath) : null
+      if (node) showCrumbPop(btn, node)
+    })
+    breadcrumbsEl.appendChild(btn)
+  }
+}
+
+pageTitleEl.addEventListener('input', () => {
+  if (currentPage) {
+    currentPage.title = pageTitleEl.value.trim() || 'Untitled'
+    refreshActiveTabLabel(currentPage.title, currentPage.icon)
+    renderBreadcrumbs()
+    scheduleSave()
+    queueTreeRefresh()
+  }
+})
+
+// ---- menu actions ----
+window.api.onMenuAction((action) => {
+  switch (action) {
+    case 'nav-back':
+      goBack()
+      break
+    case 'nav-forward':
+      goForward()
+      break
+    case 'find':
+      if (findBarEl.hidden) openFind()
+      else closeFind()
+      break
+    case 'find-workspace':
+      openSearch()
+      break
+    case 'new-page':
+      void createNewPage(null)
+      break
+    case 'new-tab':
+      void newTab()
+      break
+    case 'close-tab':
+      closeTab(activeTab)
+      break
+    case 'save':
+      void persistNow()
+      void flushTextFile()
+      break
+    case 'open-workspace':
+      void openExistingWorkspace()
+      break
+    case 'reveal-page':
+      if (currentPage) void window.api.wsReveal(currentPage.relPath)
+      break
+    case 'toggle-sidebar':
+      document.getElementById('sidebar')!.hidden = !document.getElementById('sidebar')!.hidden
+      break
+    case 'toggle-agent':
+      toggleAgentPanel()
+      break
+    case 'toggle-source':
+      toggleSource()
+      break
+    case 'cycle-theme':
+      cycleTheme()
+      break
+  }
+})
+
+function toggleAgentPanel(): void {
+  const panel = document.getElementById('agent-panel') as HTMLElement
+  panel.hidden = !panel.hidden
+  ;(document.getElementById('agent-resizer') as HTMLElement).hidden = panel.hidden
+  ;(document.getElementById('toggle-agent-btn') as HTMLElement).classList.toggle('active', !panel.hidden)
+  void window.api.setSettings('agentOpen', !panel.hidden)
+}
+
+async function openExistingWorkspace(): Promise<void> {
+  const res = await window.api.wsOpenWorkspace()
+  if (res.ok) {
+    await initWorkspace()
+  } else if (res.error) {
+    window.alert(res.error)
+  }
+}
+
+// Ensure the current page can have children: loose x.md becomes x/index.md.
+async function ensureFolderPage(): Promise<string> {
+  if (!currentPage) return ''
+  if (currentPage.relPath.endsWith('/index.md')) return currentPage.dirRel
+  const newRel = await window.api.wsConvertLoose(currentPage.relPath)
+  currentPage.relPath = newRel
+  currentPage.dirRel = dirOf(newRel)
+  await refreshTree()
+  return currentPage.dirRel
+}
+
+async function createPageNamed(name: string): Promise<string> {
+  const parentDir = await ensureFolderPage()
+  const page = await window.api.wsCreate({ parentRel: parentDir || null, title: name || 'Untitled' })
+  if (page) {
+    await refreshTree()
+    return page.title
+  }
+  return name || 'Untitled'
+}
+
+async function createNewPage(parentRel: string | null): Promise<void> {
+  // No prompt(): Electron doesn't implement it. Create immediately like Notion
+  // and focus the title so typing renames the page.
+  // '__root__' creates directly in the workspace root; anything else nests
+  // under the current page.
+  const parentDir = parentRel === '__root__' ? null : await ensureFolderPage()
+  const page = await window.api.wsCreate({ parentRel: parentDir || null, title: 'Untitled' })
+  if (page) {
+    await refreshTree()
+    await openPageByRel(page.relPath)
+    requestAnimationFrame(() => {
+      pageTitleEl.focus()
+      pageTitleEl.select()
+    })
+  }
+}
+
+// Single-flight boot: multiple calls (startup, choose, settings change) must
+// not race each other. `bootSeq` invalidates stale continuations.
+// ---------------------------------------------------------------------------
+// Workspace switcher: a dropdown listing every workspace, plus creation of
+// ordinary and private (encrypted) workspaces and the password gate.
+// ---------------------------------------------------------------------------
+const wsMenuEl = document.getElementById('ws-menu') as HTMLElement
+const lockBtn = document.getElementById('lock-ws-btn') as HTMLButtonElement
+const wsIconEl = document.getElementById('ws-icon') as HTMLElement
+
+function closeWsMenu(): void {
+  wsMenuEl.hidden = true
+  wsMenuEl.innerHTML = ''
+  document.getElementById('workspace-switcher')?.classList.remove('open')
+}
+
+async function renderWsMenu(): Promise<void> {
+  const list = await window.api.wsList()
+  const current = ((await window.api.wsGet()).displayPath ?? null) as string | null
+  wsMenuEl.innerHTML = ''
+
+  const head = document.createElement('div')
+  head.className = 'ws-menu-head'
+  head.textContent = 'Workspaces'
+  wsMenuEl.appendChild(head)
+
+  for (const w of list) {
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'ws-menu-item' + (w.path === current ? ' current' : '')
+    const icon = document.createElement('span')
+    icon.className = 'ws-menu-icon'
+    icon.textContent = w.kind === 'private' ? (w.unlocked ? '🔓' : '🔒') : '🗂️'
+    const text = document.createElement('span')
+    text.className = 'ws-menu-text'
+    const name = document.createElement('span')
+    name.className = 'ws-menu-name'
+    name.textContent = w.name
+    const sub = document.createElement('span')
+    sub.className = 'ws-menu-path'
+    sub.textContent = w.missing ? 'folder is missing' : w.path.replace(/^\/Users\/[^/]+/, '~')
+    text.append(name, sub)
+    row.append(icon, text)
+    if (w.missing) row.classList.add('missing')
+    const forget = document.createElement('span')
+    forget.className = 'ws-menu-forget'
+    forget.textContent = '✕'
+    forget.title = 'Remove from this list (keeps the folder)'
+    forget.addEventListener('click', (e) => {
+      e.stopPropagation()
+      void (async () => {
+        await window.api.wsForget(w.path)
+        await renderWsMenu()
+      })()
+    })
+    row.appendChild(forget)
+    row.addEventListener('click', () => {
+      void (async () => {
+        if (w.path === current) {
+          closeWsMenu()
+          return
+        }
+        if (w.kind === 'private') {
+          closeWsMenu()
+          void openPasswordGate({ mode: 'unlock', path: w.path, name: w.name })
+          return
+        }
+        const res = await window.api.wsSwitch(w.path)
+        if (!res.ok && res.private) {
+          closeWsMenu()
+          void openPasswordGate({ mode: 'unlock', path: w.path, name: w.name })
+          return
+        }
+        closeWsMenu()
+        await initWorkspace()
+      })()
+    })
+    wsMenuEl.appendChild(row)
+  }
+
+  const sep = document.createElement('div')
+  sep.className = 'ws-menu-sep'
+  wsMenuEl.appendChild(sep)
+
+  const add = (label: string, fn: () => void): void => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'ws-menu-action'
+    b.textContent = label
+    b.addEventListener('click', fn)
+    wsMenuEl.appendChild(b)
+  }
+  add('＋ New workspace…', () => {
+    closeWsMenu()
+    const modal = document.getElementById('workspace-modal') as HTMLElement
+    modal.hidden = false
+    ;(document.getElementById('create-name') as HTMLInputElement).focus()
+  })
+  add('🔒 New private workspace…', () => {
+    closeWsMenu()
+    void openPasswordGate({ mode: 'create' })
+  })
+  add('📂 Open existing folder…', () => {
+    closeWsMenu()
+    void (async () => {
+      const res = await window.api.wsOpenWorkspace()
+      if (res && 'private' in res && res.private && res.path) {
+        void openPasswordGate({ mode: 'unlock', path: res.path })
+        return
+      }
+      await initWorkspace()
+    })()
+  })
+}
+
+document.getElementById('workspace-switcher')!.addEventListener('click', (e) => {
+  e.stopPropagation()
+  if (!wsMenuEl.hidden) {
+    closeWsMenu()
+    return
+  }
+  void renderWsMenu().then(() => {
+    wsMenuEl.hidden = false
+    document.getElementById('workspace-switcher')?.classList.add('open')
+  })
+})
+document.addEventListener('mousedown', (e) => {
+  if (wsMenuEl.hidden) return
+  const t = e.target as Node
+  if (!wsMenuEl.contains(t) && t !== document.getElementById('workspace-switcher')) closeWsMenu()
+})
+
+// ---- lock screen (an encrypted workspace that isn't unlocked yet) ----
+document.getElementById('locked-unlock')!.addEventListener('click', () => {
+  void (async () => {
+    const info = await window.api.wsGet()
+    if (info.displayPath) openPasswordGate({ mode: 'unlock', path: info.displayPath })
+  })()
+})
+document.getElementById('locked-switch')!.addEventListener('click', () => {
+  ;(document.getElementById('locked-view') as HTMLElement).hidden = true
+  welcomeEl.hidden = false
+})
+
+// ---- password gate (create / unlock a private workspace) ----
+interface PasswordGateOpts {
+  mode: 'create' | 'unlock'
+  path?: string
+  name?: string
+}
+
+function openPasswordGate(opts: PasswordGateOpts): void {
+  const modal = document.getElementById('pw-modal') as HTMLElement
+  const title = document.getElementById('pw-title') as HTMLElement
+  const sub = document.getElementById('pw-sub') as HTMLElement
+  const input = document.getElementById('pw-input') as HTMLInputElement
+  const confirm = document.getElementById('pw-confirm') as HTMLInputElement
+  const confirmField = document.getElementById('pw-confirm-field') as HTMLElement
+  const nameField = document.getElementById('pw-name-field') as HTMLElement
+  const nameInput = document.getElementById('pw-name') as HTMLInputElement
+  const err = document.getElementById('pw-error') as HTMLElement
+  const submit = document.getElementById('pw-submit') as HTMLButtonElement
+  const locationRow = document.getElementById('pw-location-row') as HTMLElement | null
+
+  const creating = opts.mode === 'create'
+  title.textContent = creating ? 'New private workspace' : 'Unlock private workspace'
+  sub.textContent = creating
+    ? 'The contents are encrypted with this password. There is no recovery — if you lose it, the files cannot be read.'
+    : (opts.name ? opts.name : 'This workspace is encrypted.') + ' Enter its password to open it.'
+  confirmField.hidden = !creating
+  nameField.hidden = !creating
+  if (locationRow) locationRow.hidden = !creating
+  err.hidden = true
+  input.value = ''
+  confirm.value = ''
+  nameInput.value = nameInput.value || 'Private notes'
+  if (creating && locationRow) {
+    const locInput = document.getElementById('pw-location') as HTMLInputElement
+    const fromCreate = (document.getElementById('create-location') as HTMLInputElement).value.trim()
+    if (!locInput.value) locInput.value = fromCreate
+  }
+  submit.textContent = creating ? 'Create' : 'Unlock'
+  modal.hidden = false
+  window.setTimeout(() => input.focus(), 30)
+
+  let inFlight = false
+  const submitFn = async (): Promise<void> => {
+    if (inFlight) return
+    inFlight = true
+    submit.disabled = true
+    try {
+      await runGate()
+    } finally {
+      inFlight = false
+      submit.disabled = false
+    }
+  }
+  const runGate = async (): Promise<void> => {
+    const password = input.value
+    if (!password) {
+      err.textContent = 'Enter a password.'
+      err.hidden = false
+      return
+    }
+    if (creating) {
+      if (password !== confirm.value) {
+        err.textContent = 'The passwords do not match.'
+        err.hidden = false
+        return
+      }
+      const parentDir = (document.getElementById('pw-location') as HTMLInputElement | null)?.value.trim()
+      const name = nameInput.value.trim() || 'Private notes'
+      if (!parentDir) {
+        err.textContent = 'Choose where to keep it.'
+        err.hidden = false
+        return
+      }
+      await window.api.wsCreateWorkspace({ name, parentDir, private: true, password })
+      modal.hidden = true
+      await initWorkspace()
+      return
+    }
+    const res = await window.api.wsUnlock({ path: opts.path as string, password })
+    if (!res.ok) {
+      err.textContent = res.code === 'wrong-password' ? 'Incorrect password.' : res.message || 'Could not unlock.'
+      err.hidden = false
+      input.select()
+      return
+    }
+    modal.hidden = true
+    await initWorkspace()
+  }
+
+  submit.onclick = () => void submitFn()
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') void submitFn()
+    if (e.key === 'Escape') modal.hidden = true
+  }
+  confirm.onkeydown = (e) => {
+    if (e.key === 'Enter') void submitFn()
+  }
+  ;(document.getElementById('pw-cancel') as HTMLButtonElement).onclick = () => {
+    modal.hidden = true
+  }
+  const chooseLoc = document.getElementById('pw-choose-loc') as HTMLButtonElement | null
+  if (chooseLoc) {
+    chooseLoc.onclick = () => {
+      void (async () => {
+        const dir = await window.api.dirChoose()
+        if (dir) (document.getElementById('pw-location') as HTMLInputElement).value = dir
+      })()
+    }
+  }
+}
+
+lockBtn.addEventListener('click', () => {
+  void (async () => {
+    await window.api.wsLock()
+    await initWorkspace()
+  })()
+})
+
+// ---------------------------------------------------------------------------
+// Renderer diagnostics → userData/yestion.log (readable from a terminal).
+// ---------------------------------------------------------------------------
+function logLine(level: 'info' | 'warn' | 'error', message: string): void {
+  void window.api.log({ level, message })
+}
+
+window.addEventListener('error', (e) => {
+  logLine('error', `window error: ${e.message} @ ${e.filename}:${e.lineno}`)
+})
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason as { message?: string; stack?: string } | undefined
+  logLine('error', `unhandled rejection: ${r?.message ?? String(e.reason)} ${r?.stack ? `\n${r.stack}` : ''}`)
+})
+
+// ---------------------------------------------------------------------------
+// Live PDF preview (⌘⇧P / the Preview button).
+//
+// The old "paged" view drew rules at computed offsets, which was only ever an
+// estimate: the print layout differs subtly (widows/orphans, break-avoid on
+// images/tables/headings, exact margins). This instead prints the live window
+// through the real print pipeline and shows the resulting pages with pdf.js, so
+// the breaks are the ones the export will actually produce. The editor stays in
+// the left pane and the preview refreshes as you type.
+// ---------------------------------------------------------------------------
+let printPreviewOn = false
+let printPreviewTimer: number | null = null
+let printPreviewBusy = false
+let printPreviewAgain = false
+
+// What the page shows while writing: the title and icon can be hidden.
+let showPageTitle = true
+let showPageIcon = true
+
+function applyPageDisplay(): void {
+  const view = document.getElementById('page-view')
+  if (!view) return
+  view.classList.toggle('hide-title', !showPageTitle)
+  view.classList.toggle('hide-icon', !showPageIcon)
+  view.classList.toggle('no-header', !showPageTitle && !showPageIcon)
+  const titleBox = document.getElementById('pv-title') as HTMLInputElement | null
+  const iconBox = document.getElementById('pv-icon') as HTMLInputElement | null
+  if (titleBox) titleBox.checked = showPageTitle
+  if (iconBox) iconBox.checked = showPageIcon
+  schedulePrintPreview(250)
+}
+
+function closePageViewMenu(): void {
+  const menu = document.getElementById('page-view-menu')
+  if (menu) menu.hidden = true
+  document.getElementById('page-view-btn')?.classList.remove('open')
+}
+
+/** Render the current page through the print pipeline into the right pane. */
+async function refreshPrintPreview(): Promise<void> {
+  if (!printPreviewOn || !currentPage) return
+  if (splitRightEl.hidden) return
+  if (printPreviewBusy) {
+    printPreviewAgain = true
+    return
+  }
+  printPreviewBusy = true
+  const scrollTop = splitBodyEl.scrollTop
+  try {
+    // Drop the previous render FIRST. A live pdf.js viewer keeps a worker
+    // painting canvases, and Chromium's printToPDF fails when the page is busy
+    // like that — which is why the first render worked and every refresh after
+    // it did not.
+    splitPdfHandle?.destroy()
+    splitPdfHandle = null
+    clearSplitBody()
+    splitBodyEl.classList.add('print-preview')
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    const bytes = await window.api.printPagePdf({ margins: exportMargin })
+    if (!printPreviewOn) return
+    // printToPDF switches the window to print media and back. Creating the
+    // viewer in that window measured a zero-width container, so the pages came
+    // out unsized. Wait for the media to revert (and the layout to settle)
+    // before building it.
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    if (!printPreviewOn) return
+    const handle = await createPdfViewer({
+      container: splitBodyEl,
+      // fresh copy: the IPC-delivered view can share a larger buffer, which
+      // pdf.js transfers to its worker
+      bytes: new Uint8Array(bytes),
+      onState: (s) => setSplitStatus(`${s.pages} page${s.pages === 1 ? '' : 's'}`)
+    })
+    splitPdfHandle = handle
+    // Belt and braces: re-fit once more after the paint, in case the first
+    // measurement happened mid-relayout.
+    requestAnimationFrame(() => {
+      try {
+        handle.fitWidth()
+      } catch {
+        /* ignore */
+      }
+    })
+    splitBodyEl.scrollTop = scrollTop
+    logLine('info', `print preview rendered (${bytes.byteLength} bytes)`)
+  } catch (err) {
+    console.error('[yestion] print preview failed:', err)
+    logLine('error', `print preview failed: ${(err as Error)?.message ?? String(err)}\n${(err as Error)?.stack ?? ''}`)
+    setSplitStatus('Preview failed', 'error')
+    clearSplitBody()
+    const note = document.createElement('div')
+    note.className = 'split-note'
+    note.textContent = 'Could not render the preview: ' + String((err as Error)?.message ?? err)
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'ghost-btn'
+    retry.textContent = 'Try again'
+    retry.addEventListener('click', () => void refreshPrintPreview())
+    note.appendChild(document.createElement('br'))
+    note.appendChild(retry)
+    splitBodyEl.appendChild(note)
+  } finally {
+    printPreviewBusy = false
+    if (printPreviewAgain) {
+      printPreviewAgain = false
+      schedulePrintPreview(150)
+    }
+  }
+}
+
+function schedulePrintPreview(delay = 700): void {
+  if (!printPreviewOn) return
+  if (printPreviewTimer !== null) window.clearTimeout(printPreviewTimer)
+  printPreviewTimer = window.setTimeout(() => {
+    printPreviewTimer = null
+    void refreshPrintPreview()
+  }, delay)
+}
+
+function openPrintPreview(): void {
+  printPreviewOn = true
+  splitOpen = true
+  splitRightEl.hidden = false
+  splitResizerEl.hidden = false
+  applySplitRatio()
+  splitRel = null
+  splitKind = 'print'
+  splitTitle = 'PDF preview'
+  splitIcon = '📄'
+  splitTitleEl.textContent = splitTitle
+  splitIconEl.textContent = splitIcon
+  clearSplitBody()
+  splitBodyEl.classList.add('print-preview')
+  setSplitStatus('Rendering…', 'pending')
+  setActivePane('right')
+  renderTabs()
+  void refreshPrintPreview()
+}
+
+function closePrintPreview(): void {
+  printPreviewOn = false
+  if (printPreviewTimer !== null) {
+    window.clearTimeout(printPreviewTimer)
+    printPreviewTimer = null
+  }
+  closeSplit()
+}
+
+function togglePrintPreview(): void {
+  if (printPreviewOn) closePrintPreview()
+  else openPrintPreview()
+}
+
+// ---------------------------------------------------------------------------
+// Split view: two panes side by side. The main pane keeps the normal editor and
+// tab machine; the second pane shows another tab (or, with none open, a page
+// navigator). Whichever pane is active owns the sidebar, the agent context and
+// find — like the focused window on a Mac.
+// ---------------------------------------------------------------------------
+let splitOpen = false
+let splitRel: string | null = null
+let splitKind = 'page'
+let splitTitle = ''
+let splitIcon = ''
+let activePane: 'left' | 'right' = 'left'
+let splitPdfHandle: PdfViewerHandle | null = null
+let splitEditor: RichEditor | null = null
+let splitRatio = 0.5
+// Raw front matter of the split page (kept apart from the header's display
+// icon, so saving never writes a fallback emoji into the file).
+let splitPageTitle = ''
+let splitPageIcon = ''
+let splitLoading = false
+let splitDirty = false
+let splitSaveTimer: number | null = null
+let splitSaving = false
+
+const splitRightEl = document.getElementById('split-right') as HTMLElement
+const splitBodyEl = document.getElementById('split-body') as HTMLElement
+const splitTitleEl = document.getElementById('split-title') as HTMLElement
+const splitIconEl = document.getElementById('split-icon') as HTMLElement
+const contentLeftEl = document.getElementById('content-left') as HTMLElement
+const contentRowEl = document.getElementById('content-row') as HTMLElement
+const splitResizerEl = document.getElementById('split-resizer') as HTMLElement
+
+/** A second editor, read-only, so the split pane renders EXACTLY like the main
+ *  one: page-link chips, equations, tables, task lists, images — all of it. */
+function ensureSplitEditor(): RichEditor {
+  if (splitEditor) return splitEditor
+  // Same classes as the main editor mount, so the typography is identical.
+  const wrap = document.createElement('div')
+  wrap.className = 'markdown-body rich-editor split-editor-wrap'
+  splitBodyEl.appendChild(wrap)
+  splitEditor = createRichEditor(wrap, '', () => {
+    if (splitLoading) return
+    scheduleSplitSave()
+  }, {
+    ...pageOpts,
+    getBaseDir: () => (splitRel ? splitDirAbs() : null),
+    resolvePage: async (name) => {
+      const page = await window.api.wsResolveLink(name, splitDirRel())
+      return page ? { title: page.title, icon: page.icon } : null
+    },
+    openPage: async (name) => {
+      const page = await window.api.wsResolveLink(name, splitDirRel())
+      // Following a link in the split pane replaces what that pane shows.
+      if (page) await setSplitTarget(page.relPath, 'page', page.title)
+    },
+    // Must match the main editor: the factory stores these in module scope, so
+    // leaving it out would disable the main editor's save-after-insert.
+    afterNewPageLink: () => window.setTimeout(flushSave, 60)
+  })
+  return splitEditor
+}
+
+function setSplitStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): void {
+  const el = document.getElementById('split-status')
+  if (!el) return
+  el.textContent = text
+  el.classList.toggle('ok', kind === 'ok')
+  el.classList.toggle('pending', kind === 'pending')
+  el.classList.toggle('error', kind === 'error')
+}
+
+function scheduleSplitSave(): void {
+  if (!splitRel || splitKind !== 'page' || !splitEditor) return
+  splitDirty = true
+  setSplitStatus('Unsaved…', 'pending')
+  if (splitSaveTimer !== null) window.clearTimeout(splitSaveTimer)
+  splitSaveTimer = window.setTimeout(() => {
+    splitSaveTimer = null
+    void saveSplitNow()
+  }, 1200)
+}
+
+async function saveSplitNow(): Promise<void> {
+  if (!splitRel || splitKind !== 'page' || !splitEditor || splitSaving) return
+  splitSaving = true
+  try {
+    const body = splitEditor.getMarkdown()
+    const ok = await window.api.wsSave({
+      relPath: splitRel,
+      title: splitPageTitle || splitTitle,
+      icon: splitPageIcon,
+      body
+    })
+    if (ok) {
+      splitDirty = false
+      setSplitStatus(
+        'Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      )
+    } else {
+      setSplitStatus('Save failed', 'error')
+    }
+  } catch (err) {
+    console.error('[yestion] split save failed:', err)
+    setSplitStatus('Save failed', 'error')
+  } finally {
+    splitSaving = false
+  }
+}
+
+function splitDirRel(): string | undefined {
+  const rel = splitRel ?? ''
+  const dir = rel.replace(/\/[^/]*$/, '')
+  return dir || undefined
+}
+
+let splitRootCache: string | null = null
+async function refreshSplitRoot(): Promise<void> {
+  const info = await window.api.wsGet()
+  splitRootCache = info.workspace ?? null
+}
+
+function splitDirAbs(): string | null {
+  if (!splitRootCache || !splitRel) return null
+  const abs = splitRootCache + '/' + splitRel
+  return abs.replace(/\/[^/]*$/, '')
+}
+
+/** Grid columns keep the user's chosen pane ratio. */
+function applySplitRatio(): void {
+  contentRowEl.style.gridTemplateColumns = `minmax(0, ${splitRatio}fr) 10px minmax(0, ${1 - splitRatio}fr)`
+}
+
+function splitIconFor(kind: string): string {
+  if (kind === 'pdf') return '📕'
+  if (kind === 'image') return '🖼'
+  if (kind === 'file' || kind === 'binary') return '📄'
+  return '📄'
+}
+
+function toFileUrl(p: string): string {
+  if (/^(https?:|data:|file:|blob:)/i.test(p)) return p
+  const clean = p.replace(/^file:\/\//, '')
+  return 'file://' + clean.split('/').map((seg, i) => (i === 0 ? seg : encodeURIComponent(seg))).join('/')
+}
+
+function setActivePane(pane: 'left' | 'right'): void {
+  if (!splitOpen) pane = 'left'
+  activePane = pane
+  contentLeftEl.classList.toggle('active', pane === 'left')
+  splitRightEl.classList.toggle('active', pane === 'right')
+  contentRowEl.classList.toggle('split', splitOpen)
+  renderTabs()
+  renderBreadcrumbs()
+}
+
+/** The page/file the user is working on right now (sidebar, agent, find). */
+function activeContext(): { title: string; relPath: string } | null {
+  if (splitOpen && activePane === 'right' && splitRel) {
+    return { title: splitTitle || splitRel, relPath: splitRel }
+  }
+  return currentPage ? { title: currentPage.title, relPath: currentPage.relPath } : null
+}
+
+function clearSplitBody(): void {
+  splitPdfHandle?.destroy()
+  splitPdfHandle = null
+  // Keep the read-only editor mounted (it is reused); drop anything else.
+  for (const child of [...splitBodyEl.children]) {
+    if (child.classList.contains('split-editor-wrap')) continue
+    child.remove()
+  }
+  splitBodyEl.scrollTop = 0
+}
+
+function closeSplit(): void {
+  if (splitDirty) {
+    if (splitSaveTimer !== null) {
+      window.clearTimeout(splitSaveTimer)
+      splitSaveTimer = null
+    }
+    void saveSplitNow()
+  }
+  splitOpen = false
+  splitRel = null
+  splitTitle = ''
+  splitIcon = ''
+  clearSplitBody()
+  splitRightEl.hidden = true
+  splitResizerEl.hidden = true
+  setActivePane('left')
+  renderTabs()
+}
+
+async function setSplitTarget(rel: string, kind: string, title?: string): Promise<void> {
+  // Picking something else in that pane means leaving the print preview.
+  printPreviewOn = false
+  splitBodyEl.classList.remove('print-preview')
+  // Leaving the current split page: make sure its edits are on disk.
+  if (splitDirty) {
+    if (splitSaveTimer !== null) {
+      window.clearTimeout(splitSaveTimer)
+      splitSaveTimer = null
+    }
+    await saveSplitNow()
+  }
+  await refreshSplitRoot()
+  splitOpen = true
+  splitRightEl.hidden = false
+  splitRel = rel
+  splitKind = kind
+  splitTitle = title ?? rel.split('/').filter(Boolean).pop() ?? rel
+  splitIcon = splitIconFor(kind)
+  splitTitleEl.textContent = splitTitle
+  splitIconEl.textContent = splitIcon
+  clearSplitBody()
+  renderTabs()
+
+  if (kind === 'page') {
+    const page = await window.api.wsRead(rel)
+    if (!page) {
+      splitBodyEl.innerHTML = '<div class="split-note">Could not read this page.</div>'
+      return
+    }
+    splitPageTitle = page.title
+    splitPageIcon = page.icon
+    splitTitle = page.title
+    splitIcon = page.icon || '📄'
+    splitTitleEl.textContent = splitTitle
+    splitIconEl.textContent = splitIcon
+    const editor = ensureSplitEditor()
+    splitLoading = true
+    try {
+      editor.setContent(page.body)
+    } finally {
+      splitLoading = false
+    }
+    splitDirty = false
+    setSplitStatus('')
+    return
+  }
+  if (kind === 'image') {
+    const info = await window.api.wsGet()
+    const abs = info.workspace && !rel.startsWith('/') ? info.workspace + '/' + rel : rel
+    const img = document.createElement('img')
+    img.className = 'split-image'
+    img.src = toFileUrl(abs)
+    splitBodyEl.appendChild(img)
+    return
+  }
+  if (kind === 'pdf') {
+    const info = await window.api.wsGet()
+    const abs = info.workspace && !rel.startsWith('/') ? info.workspace + '/' + rel : rel
+    const bytes = await window.api.readBytes(abs)
+    if (!bytes || bytes.byteLength === 0) {
+      splitBodyEl.innerHTML = '<div class="split-note">Could not read this PDF.</div>'
+      return
+    }
+    try {
+      splitPdfHandle = await createPdfViewer({ container: splitBodyEl, bytes })
+    } catch {
+      splitBodyEl.innerHTML = '<div class="split-note">Could not display this PDF.</div>'
+    }
+    return
+  }
+  // plain text / other files: show the source
+  const file = await window.api.readTextFile(rel)
+  const pre = document.createElement('pre')
+  pre.className = 'split-text'
+  pre.textContent = file?.content ?? '(empty)'
+  splitBodyEl.appendChild(pre)
+}
+
+/** The menu shown when the pane has nothing in it: other tabs, or a page list. */
+function showSplitPicker(): void {
+  clearSplitBody()
+  splitTitleEl.textContent = 'Split'
+  splitIconEl.textContent = '⬓'
+
+  const wrap = document.createElement('div')
+  wrap.className = 'split-picker'
+
+  const others = tabs.filter((t) => t.relPath !== tabs[activeTab]?.relPath)
+  if (others.length > 0) {
+    const label = document.createElement('div')
+    label.className = 'split-picker-label'
+    label.textContent = 'Open tabs'
+    wrap.appendChild(label)
+    for (const t of others) {
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'split-picker-row'
+      const icon = document.createElement('span')
+      icon.className = 'split-picker-icon'
+      icon.textContent = tabIconFor(t)
+      const name = document.createElement('span')
+      name.className = 'split-picker-name'
+      name.textContent = t.title
+      row.append(icon, name)
+      row.addEventListener('click', () => void setSplitTarget(t.relPath, t.kind, t.title))
+      wrap.appendChild(row)
+    }
+  }
+
+  const search = document.createElement('input')
+  search.className = 'split-picker-search'
+  search.placeholder = others.length > 0 ? 'Or search every page…' : 'Search pages to open here…'
+  search.spellcheck = false
+  wrap.appendChild(search)
+
+  const list = document.createElement('div')
+  list.className = 'split-picker-list'
+  wrap.appendChild(list)
+  splitBodyEl.appendChild(wrap)
+
+  let all: { title: string; icon: string; relPath: string }[] = []
+  const draw = (): void => {
+    const q = search.value.trim().toLowerCase()
+    list.innerHTML = ''
+    const matches = (q
+      ? all.filter((p) => p.title.toLowerCase().includes(q) || p.relPath.toLowerCase().includes(q))
+      : all
+    ).slice(0, 60)
+    if (matches.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'split-note'
+      empty.textContent = q ? 'No pages match.' : 'No pages yet.'
+      list.appendChild(empty)
+      return
+    }
+    for (const p of matches) {
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'split-picker-row'
+      const icon = document.createElement('span')
+      icon.className = 'split-picker-icon'
+      icon.textContent = p.icon || '📄'
+      const name = document.createElement('span')
+      name.className = 'split-picker-name'
+      name.textContent = p.title
+      const path = document.createElement('span')
+      path.className = 'split-picker-path'
+      const parent = p.relPath.includes('/') ? p.relPath.slice(0, p.relPath.lastIndexOf('/')) : ''
+      path.textContent = parent
+      row.append(icon, name, path)
+      row.addEventListener('click', () => void setSplitTarget(p.relPath, 'page', p.title))
+      list.appendChild(row)
+    }
+  }
+  search.addEventListener('input', draw)
+  void window.api.wsAllPages().then((pages) => {
+    all = pages
+    draw()
+  })
+  requestAnimationFrame(() => search.focus())
+}
+
+function openSplit(): void {
+  splitOpen = true
+  splitRightEl.hidden = false
+  splitResizerEl.hidden = false
+  applySplitRatio()
+  setActivePane('right')
+  const other = tabs.find((t) => t.relPath !== tabs[activeTab]?.relPath)
+  if (other) void setSplitTarget(other.relPath, other.kind, other.title)
+  else showSplitPicker()
+}
+
+function toggleSplit(): void {
+  if (splitOpen) closeSplit()
+  else openSplit()
+}
+
+splitResizerEl.addEventListener('pointerdown', (down: PointerEvent) => {
+  down.preventDefault()
+  splitResizerEl.setPointerCapture(down.pointerId)
+  document.body.classList.add('resizing-h')
+  const rect = contentRowEl.getBoundingClientRect()
+  const onMove = (move: PointerEvent): void => {
+    const ratio = (move.clientX - rect.left) / Math.max(1, rect.width)
+    splitRatio = Math.min(0.8, Math.max(0.2, ratio))
+    applySplitRatio()
+  }
+  const onUp = (): void => {
+    splitResizerEl.removeEventListener('pointermove', onMove)
+    splitResizerEl.removeEventListener('pointerup', onUp)
+    splitResizerEl.removeEventListener('pointercancel', onUp)
+    document.body.classList.remove('resizing-h')
+    void window.api.setSettings('splitRatio', splitRatio)
+  }
+  splitResizerEl.addEventListener('pointermove', onMove)
+  splitResizerEl.addEventListener('pointerup', onUp)
+  splitResizerEl.addEventListener('pointercancel', onUp)
+})
+
+document.getElementById('toggle-split-btn')!.addEventListener('click', () => toggleSplit())
+document.getElementById('split-close')!.addEventListener('click', () => closeSplit())
+document.getElementById('split-change')!.addEventListener('click', () => showSplitPicker())
+
+// Clicking a pane makes it the one the rest of the app acts on.
+contentLeftEl.addEventListener('mousedown', () => setActivePane('left'), true)
+splitRightEl.addEventListener('mousedown', () => setActivePane('right'), true)
+
+// ---------------------------------------------------------------------------
+// Find in page (⌘F): highlights matches in whatever pane is showing — the rich
+// editor, the source editor, a text file or the PDF text layer — with a compact
+// bar instead of a full-screen dialog. Uses the CSS Custom Highlight API so
+// nothing in the document DOM is modified (ProseMirror stays untouched).
+// ---------------------------------------------------------------------------
+const findBarEl = document.getElementById('find-bar') as HTMLElement
+const findInputEl = document.getElementById('find-input') as HTMLInputElement
+const findCountEl = document.getElementById('find-count') as HTMLElement
+let findRanges: Range[] = []
+let findIndex = 0
+let findTimer: number | null = null
+
+function findRoots(): HTMLElement[] {
+  const roots: HTMLElement[] = []
+  // Search whichever pane is active, so matches land where the user is looking.
+  if (splitOpen && activePane === 'right') {
+    if (splitRel && splitKind === 'page') roots.push(splitBodyEl)
+    else if (splitRel && (splitKind === 'file' || splitKind === 'binary')) roots.push(splitBodyEl)
+    return roots
+  }
+  if (!pageViewEl.hidden) {
+    // Split view shows both surfaces; search whichever are visible.
+    for (const sel of ['.rich-editor .ProseMirror', '.cm-content']) {
+      const el = pageViewEl.querySelector(sel) as HTMLElement | null
+      if (el && el.offsetParent !== null) roots.push(el)
+    }
+  }
+  if (!pdfPaneEl.hidden) {
+    const el = pdfPaneEl.querySelector('.pdf-pages') as HTMLElement | null
+    if (el) roots.push(el)
+  }
+  if (!textPaneEl.hidden) {
+    const el = textMountEl.querySelector('.cm-content') as HTMLElement | null
+    if (el) roots.push(el)
+  }
+  return roots
+}
+
+const MAX_FIND_MATCHES = 800
+
+function collectFindMatches(query: string): Range[] {
+  const q = query.toLowerCase()
+  const out: Range[] = []
+  if (!q) return out
+  for (const root of findRoots()) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    const nodes: Text[] = []
+    let text = ''
+    let n: Node | null
+    while ((n = walker.nextNode())) {
+      const t = n as Text
+      nodes.push(t)
+      text += t.data
+    }
+    if (!text) continue
+    const lower = text.toLowerCase()
+    const locate = (index: number): { node: Text; offset: number } | null => {
+      let acc = 0
+      for (const node of nodes) {
+        const len = node.data.length
+        if (index <= acc + len) return { node, offset: index - acc }
+        acc += len
+      }
+      const last = nodes[nodes.length - 1]
+      return last ? { node: last, offset: last.data.length } : null
+    }
+    let from = 0
+    while (out.length < MAX_FIND_MATCHES) {
+      const at = lower.indexOf(q, from)
+      if (at < 0) break
+      const start = locate(at)
+      const end = locate(at + q.length)
+      if (start && end) {
+        const range = document.createRange()
+        range.setStart(start.node, start.offset)
+        range.setEnd(end.node, end.offset)
+        out.push(range)
+      }
+      from = at + Math.max(1, q.length)
+    }
+    if (out.length >= MAX_FIND_MATCHES) break
+  }
+  return out
+}
+
+function paintFindHighlights(): void {
+  const anyCss = CSS as unknown as { highlights?: Map<string, unknown> }
+  if (!anyCss.highlights) return // older Chromium: search still scrolls, no tint
+  const rest = new Highlight()
+  const current = new Highlight()
+  findRanges.forEach((range, i) => (i === findIndex ? current : rest).add(range))
+  anyCss.highlights.set('yestion-find', rest)
+  anyCss.highlights.set('yestion-find-current', current)
+}
+
+function clearFindHighlights(): void {
+  const anyCss = CSS as unknown as { highlights?: Map<string, unknown> }
+  anyCss.highlights?.delete('yestion-find')
+  anyCss.highlights?.delete('yestion-find-current')
+}
+
+function updateFindCount(): void {
+  findCountEl.textContent = findRanges.length ? `${findIndex + 1}/${findRanges.length}` : findInputEl.value ? '0/0' : ''
+}
+
+function scrollToFindMatch(): void {
+  const range = findRanges[findIndex]
+  if (!range) return
+  const el =
+    (range.startContainer.nodeType === Node.TEXT_NODE
+      ? range.startContainer.parentElement
+      : (range.startContainer as HTMLElement)) ?? null
+  el?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+}
+
+function runFind(resetIndex = true): void {
+  findRanges = collectFindMatches(findInputEl.value.trim())
+  if (resetIndex || findIndex >= findRanges.length) findIndex = 0
+  paintFindHighlights()
+  updateFindCount()
+  if (findRanges.length) scrollToFindMatch()
+}
+
+function stepFind(delta: number): void {
+  if (findRanges.length === 0) return
+  findIndex = (findIndex + delta + findRanges.length) % findRanges.length
+  paintFindHighlights()
+  updateFindCount()
+  scrollToFindMatch()
+}
+
+/** Sit just under the chrome rows (command bar → tabs → breadcrumbs). */
+function placeFindBar(): void {
+  const cmd = document.getElementById('top-command') as HTMLElement | null
+  const tabs = document.getElementById('tab-bar') as HTMLElement | null
+  const crumb = document.getElementById('crumb-bar') as HTMLElement | null
+  let top = 8
+  if (cmd && !cmd.hidden) top = cmd.offsetTop + cmd.offsetHeight + 4
+  if (tabs && !tabs.hidden) top = tabs.offsetTop + tabs.offsetHeight + 4
+  if (crumb && !crumb.hidden) top = crumb.offsetTop + crumb.offsetHeight + 6
+  findBarEl.style.top = top + 'px'
+}
+
+function openFind(): void {
+  findBarEl.hidden = false
+  placeFindBar()
+  findInputEl.focus()
+  findInputEl.select()
+  if (findInputEl.value.trim()) runFind()
+}
+
+function closeFind(): void {
+  findBarEl.hidden = true
+  findRanges = []
+  clearFindHighlights()
+  findCountEl.textContent = ''
+}
+
+findInputEl.addEventListener('input', () => {
+  if (findTimer !== null) window.clearTimeout(findTimer)
+  findTimer = window.setTimeout(() => {
+    findTimer = null
+    runFind()
+  }, 120)
+})
+
+findInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    stepFind(e.shiftKey ? -1 : 1)
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    closeFind()
+  }
+})
+
+window.addEventListener('resize', () => {
+  if (!findBarEl.hidden) placeFindBar()
+})
+
+window.addEventListener('resize', () => {
+  if (!findBarEl.hidden) placeFindBar()
+})
+
+document.getElementById('find-next')!.addEventListener('click', () => stepFind(1))
+document.getElementById('find-prev')!.addEventListener('click', () => stepFind(-1))
+document.getElementById('find-close')!.addEventListener('click', () => closeFind())
+
+// ---------------------------------------------------------------------------
+// Workspace search (⌘⇧F): page titles, file names and markdown content.
+// ---------------------------------------------------------------------------
+interface SearchHit {
+  relPath: string
+  title: string
+  icon: string
+  kind: string
+  line: number
+  snippet: string
+}
+
+const searchModalEl = document.getElementById('search-modal') as HTMLElement
+const searchInputEl = document.getElementById('search-input') as HTMLInputElement
+const searchResultsEl = document.getElementById('search-results') as HTMLElement
+const searchCountEl = document.getElementById('search-count') as HTMLElement
+let searchHits: SearchHit[] = []
+let searchActive = 0
+let searchTimer: number | null = null
+let searchSeq = 0
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] as string)
+}
+
+function searchIconFor(hit: SearchHit): string {
+  if (hit.icon) return hit.icon
+  if (hit.kind === 'page') return '📄'
+  return hit.kind || '📄'
+}
+
+function renderSearchResults(): void {
+  searchResultsEl.innerHTML = ''
+  if (searchHits.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'search-empty'
+    empty.textContent = searchInputEl.value.trim() ? 'No matches.' : 'Type to search titles, file names and page content.'
+    searchResultsEl.appendChild(empty)
+    searchCountEl.textContent = ''
+    return
+  }
+  if (searchActive >= searchHits.length) searchActive = 0
+  searchCountEl.textContent = `${searchHits.length} result${searchHits.length === 1 ? '' : 's'}`
+  const q = searchInputEl.value.trim()
+  searchHits.forEach((hit, i) => {
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'search-hit' + (i === searchActive ? ' active' : '')
+    const icon = document.createElement('span')
+    icon.className = 'search-hit-icon'
+    icon.textContent = searchIconFor(hit)
+    const title = document.createElement('span')
+    title.className = 'search-hit-title'
+    const parent = hit.relPath.includes('/') ? hit.relPath.slice(0, hit.relPath.lastIndexOf('/')) : ''
+    title.innerHTML =
+      escapeHtml(hit.title) +
+      (parent ? ` <span class="search-hit-path">${escapeHtml(parent)}</span>` : '')
+    const snippet = document.createElement('span')
+    snippet.className = 'search-hit-snippet'
+    const text = hit.snippet || (hit.line > 0 ? '' : '')
+    if (text && q) {
+      const at = text.toLowerCase().indexOf(q.toLowerCase())
+      if (at >= 0) {
+        snippet.innerHTML =
+          escapeHtml(text.slice(0, at)) +
+          '<mark>' +
+          escapeHtml(text.slice(at, at + q.length)) +
+          '</mark>' +
+          escapeHtml(text.slice(at + q.length))
+      } else {
+        snippet.textContent = text
+      }
+    } else {
+      snippet.textContent = text
+    }
+    row.append(icon, title, snippet)
+    row.addEventListener('mousemove', () => {
+      if (searchActive !== i) {
+        searchActive = i
+        renderSearchResults()
+      }
+    })
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      openSearchHit(i, e.metaKey || e.ctrlKey)
+    })
+    if (i === searchActive) requestAnimationFrame(() => row.scrollIntoView({ block: 'nearest' }))
+    searchResultsEl.appendChild(row)
+  })
+}
+
+async function runSearch(): Promise<void> {
+  const q = searchInputEl.value.trim()
+  const seq = ++searchSeq
+  if (!q) {
+    searchHits = []
+    searchActive = 0
+    renderSearchResults()
+    return
+  }
+  const hits = await window.api.wsSearch(q)
+  if (seq !== searchSeq) return // a newer query already went out
+  searchHits = hits
+  searchActive = 0
+  renderSearchResults()
+}
+
+function openSearchHit(index: number, newTab = false): void {
+  const hit = searchHits[index]
+  if (!hit) return
+  closeSearch()
+  const kind = hit.kind === 'page' ? 'page' : hit.kind
+  void openRel(hit.relPath, kind, newTab)
+}
+
+function openSearch(): void {
+  searchModalEl.hidden = false
+  searchInputEl.value = ''
+  searchHits = []
+  searchActive = 0
+  renderSearchResults()
+  searchInputEl.focus()
+}
+
+function closeSearch(): void {
+  searchModalEl.hidden = true
+}
+
+searchInputEl.addEventListener('input', () => {
+  if (searchTimer !== null) window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    searchTimer = null
+    void runSearch()
+  }, 150)
+})
+
+searchInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    if (searchHits.length) {
+      searchActive = (searchActive + 1) % searchHits.length
+      renderSearchResults()
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    if (searchHits.length) {
+      searchActive = (searchActive - 1 + searchHits.length) % searchHits.length
+      renderSearchResults()
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    openSearchHit(searchActive, e.metaKey || e.ctrlKey)
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    closeSearch()
+  }
+})
+
+searchModalEl.addEventListener('mousedown', (e) => {
+  if (e.target === searchModalEl) closeSearch()
+})
+
+window.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return
+  e.preventDefault()
+  if (e.shiftKey) {
+    // ⌘⇧F — search the whole workspace
+    if (!searchModalEl.hidden) closeSearch()
+    else openSearch()
+    return
+  }
+  // ⌘F — find in the current page
+  if (findBarEl.hidden) openFind()
+  else closeFind()
+})
+
+// ---------------------------------------------------------------------------
+// Top command bar: theme picker, panel toggles. Plus the sidebar's
+// Open Editors and Outline sections.
+// ---------------------------------------------------------------------------
+const themeSelectEl = document.getElementById('theme-select') as HTMLSelectElement
+
+function buildThemeSelect(): void {
+  themeSelectEl.innerHTML = ''
+  for (const t of THEMES) {
+    const opt = document.createElement('option')
+    opt.value = t.id
+    opt.textContent = t.label
+    themeSelectEl.appendChild(opt)
+  }
+  syncThemeSelect()
+}
+themeSelectEl.addEventListener('change', () => {
+  setTheme(themeSelectEl.value)
+})
+
+function setSidebarOpen(open: boolean, persist = true): void {
+  ;(document.getElementById('sidebar') as HTMLElement).hidden = !open
+  ;(document.getElementById('sidebar-resizer') as HTMLElement).hidden = !open
+  if (persist) void window.api.setSettings('sidebarOpen', open)
+}
+
+document.getElementById('page-mode-btn')!.addEventListener('click', () => togglePrintPreview())
+window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+    e.preventDefault()
+    togglePrintPreview()
+  }
+})
+
+document.getElementById('nav-back')!.addEventListener('click', () => goBack())
+document.getElementById('nav-forward')!.addEventListener('click', () => goForward())
+window.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return
+  if (e.key === '[') {
+    e.preventDefault()
+    goBack()
+  } else if (e.key === ']') {
+    e.preventDefault()
+    goForward()
+  }
+})
+
+document.getElementById('toggle-sidebar-btn')!.addEventListener('click', () => {
+  const sb = document.getElementById('sidebar') as HTMLElement
+  setSidebarOpen(sb.hidden as boolean)
+})
+
+
+// ---- Open Editors (mirrors the tab strip) ----
+function renderOpenEditors(): void {
+  const host = document.getElementById('open-editors') as HTMLElement
+  host.innerHTML = ''
+  if (tabs.length === 0) {
+    const hint = document.createElement('div')
+    hint.className = 'sidebar-empty'
+    hint.textContent = 'No open pages'
+    host.appendChild(hint)
+    return
+  }
+  tabs.forEach((tab, i) => {
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'oe-row' + (i === activeTab ? ' current' : '')
+    const icon = document.createElement('span')
+    icon.className = 'oe-icon'
+    icon.textContent = tabIconFor(tab)
+    const label = document.createElement('span')
+    label.className = 'oe-label'
+    label.textContent = tab.title
+    const close = document.createElement('span')
+    close.className = 'oe-close'
+    close.textContent = '×'
+    close.title = 'Close'
+    close.addEventListener('click', (e) => {
+      e.stopPropagation()
+      closeTab(i)
+    })
+    row.append(icon, label, close)
+    row.addEventListener('click', () => {
+      if (splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
+        void setSplitTarget(tab.relPath, tab.kind, tab.title)
+        return
+      }
+      void activateTab(i)
+    })
+    host.appendChild(row)
+  })
+}
+
+// ---- Outline (headings of the current page) ----
+let outlineTimer: number | null = null
+
+function renderOutline(): void {
+  const host = document.getElementById('page-outline') as HTMLElement
+  host.innerHTML = ''
+  const editor = document.querySelector('.rich-editor .ProseMirror') as HTMLElement | null
+  const headings = editor && !pageViewEl.hidden
+    ? ([...editor.querySelectorAll('h1, h2, h3, h4')] as HTMLElement[])
+    : []
+  if (headings.length === 0) {
+    const hint = document.createElement('div')
+    hint.className = 'sidebar-empty'
+    hint.textContent = 'No headings'
+    host.appendChild(hint)
+    return
+  }
+  let minLevel = 9
+  for (const h of headings) minLevel = Math.min(minLevel, Number(h.tagName[1]))
+  for (const h of headings) {
+    const level = Number(h.tagName[1])
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'outline-row'
+    row.style.paddingLeft = `${10 + (level - minLevel) * 14}px`
+    row.textContent = h.textContent?.trim() || '(untitled)'
+    row.addEventListener('click', () => {
+      if (viewMode !== 'rich') {
+        viewMode = 'rich'
+        applyViewMode()
+      }
+      h.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
+    host.appendChild(row)
+  }
+}
+
+function scheduleOutline(delay = 250): void {
+  if (outlineTimer !== null) window.clearTimeout(outlineTimer)
+  outlineTimer = window.setTimeout(() => {
+    outlineTimer = null
+    renderOutline()
+  }, delay)
+}
+
+const outlineObserver = new MutationObserver(() => scheduleOutline())
+
+function watchOutline(): void {
+  const editor = document.querySelector('.rich-editor .ProseMirror')
+  if (editor) outlineObserver.observe(editor, { childList: true, subtree: true })
+}
+
+let bootSeq = 0
+
+// Set once the agent panel exists; lets workspace switching reset it without a
+// circular reference at module scope.
+let restartAgentPanel: (() => Promise<void>) | null = null
+
+async function initWorkspace(): Promise<void> {
+  const seq = ++bootSeq
+  const res = await window.api.wsGet()
+  if (seq !== bootSeq) return // superseded by a newer boot
+  const base = res.workspace
+  if (!base) {
+    welcomeEl.hidden = false
+    pageViewEl.hidden = true
+    emptyStateEl.hidden = true
+    pageLoaderEl.hidden = true
+    return
+  }
+  const info = await window.api.wsGet()
+  if (info.locked && info.displayPath) {
+    // Encrypted workspace that hasn't been unlocked in this run.
+    const lockedView = document.getElementById('locked-view') as HTMLElement
+    ;(document.getElementById('locked-title') as HTMLElement).textContent = info.displayPath.split('/').pop()?.replace(/^\./, '').replace(/\.yestion$/, '') || 'Private workspace'
+    lockedView.hidden = false
+    welcomeEl.hidden = true
+    pageViewEl.hidden = true
+    emptyStateEl.hidden = true
+    pdfPaneEl.hidden = true
+    imagePaneEl.hidden = true
+    textPaneEl.hidden = true
+    pageLoaderEl.hidden = true
+    workspaceNameEl.textContent = (info.displayPath.split('/').pop() ?? '').replace(/^\./, '').replace(/\.yestion$/, '')
+    return
+  }
+  ;(document.getElementById('locked-view') as HTMLElement).hidden = true
+  const display = info.displayPath ?? base
+  const isPrivate = !!info.private
+  const name = info.name || display.split('/').pop() || 'Yestion'
+  workspaceNameEl.textContent = isPrivate ? name + ' 🔒' : name
+  ;(document.getElementById('sidebar-ws-name') as HTMLElement).textContent = name + (isPrivate ? ' 🔒' : '')
+  wsIconEl.textContent = isPrivate ? '🔒' : '🗂️'
+  lockBtn.hidden = !isPrivate
+  ;(document.getElementById('workspace-switcher') as HTMLButtonElement).title = display
+  // The agent can't read an encrypted workspace; make that visible instead of
+  // failing on the first prompt.
+  const agentToggle = document.getElementById('toggle-agent-btn') as HTMLButtonElement | null
+  if (agentToggle) {
+    agentToggle.disabled = isPrivate
+    agentToggle.title = isPrivate ? 'The agent is unavailable in private workspaces' : 'Toggle agent panel'
+  }
+  if (isPrivate && !(document.getElementById('agent-panel') as HTMLElement).hidden) {
+    ;(document.getElementById('agent-panel') as HTMLElement).hidden = true
+    await restartAgentPanel?.()
+  }
+  welcomeEl.hidden = true
+  emptyStateEl.hidden = true
+  pageLoaderEl.hidden = false
+  try {
+    const tree = await window.api.wsTree()
+    if (seq !== bootSeq) return
+    lastRoot = tree
+    setupSidebar(tree, {
+      currentRel: currentPage?.relPath ?? null,
+      onOpen: (rel, kind, newTab) => {
+        void openRel(rel, kind, newTab === true)
+      }
+    })
+    const savedTabs = (await window.api.getSettings('openTabs')) as unknown[] | undefined
+    const firstRel = findFirstPage(tree)
+    if (savedTabs && savedTabs.length > 0) {
+      await restoreTabs()
+    } else if (firstRel) {
+      await openRel(firstRel, 'page')
+    } else {
+      pageViewEl.hidden = true
+      emptyStateEl.hidden = false
+    }
+  } finally {
+    if (seq === bootSeq) pageLoaderEl.hidden = true
+  }
+}
+
+function findFirstPage(node: { kind: string; relPath: string; children?: unknown[] }): string | null {
+  if (node.kind === 'page') return node.relPath
+  for (const child of (node.children ?? []) as { kind: string; relPath: string; children?: unknown[] }[]) {
+    const found = findFirstPage(child)
+    if (found) return found
+  }
+  return null
+}
+
+// ---- resizable bars ----
+function attachResizer(handleId: string, targetId: string, settingKey: 'sidebarWidth' | 'agentWidth', min: number, max: number): void {
+  const handle = document.getElementById(handleId) as HTMLElement
+  const target = document.getElementById(targetId) as HTMLElement
+  if (!handle || !target) return
+  handle.addEventListener('pointerdown', (downEvent) => {
+    downEvent.preventDefault()
+    handle.setPointerCapture(downEvent.pointerId)
+    const startX = downEvent.clientX
+    const isSidebar = settingKey === 'sidebarWidth'
+    const startWidth = target.getBoundingClientRect().width
+    document.body.classList.add('resizing-h')
+    const onMove = (moveEvent: PointerEvent): void => {
+      const dx = moveEvent.clientX - startX
+      const width = Math.min(max, Math.max(min, isSidebar ? startWidth + dx : startWidth - dx))
+      target.style.flexBasis = width + 'px'
+      void window.api.setSettings(settingKey, Math.round(width))
+    }
+    const onUp = (): void => {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      document.body.classList.remove('resizing-h')
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
+  })
+}
+
+// ---- boot ----
+async function init(): Promise<void> {
+  const res = await window.api.wsGet()
+  const savedTheme = res.theme ?? 'light'
+  setTheme(savedTheme)
+  applyPreviewFont(((await window.api.getSettings('previewFont')) as string | undefined) ?? 'default')
+  applyRenderSize(((await window.api.getSettings('renderFontSize')) as string | undefined) ?? 'm')
+  const previewBtn = document.getElementById('page-mode-btn')
+  if (previewBtn) previewBtn.textContent = 'Preview'
+  showPageTitle = ((await window.api.getSettings('showPageTitle')) as boolean | undefined) ?? true
+  showPageIcon = ((await window.api.getSettings('showPageIcon')) as boolean | undefined) ?? true
+  applyPageDisplay()
+  exportMargin = ((await window.api.getSettings('exportMargin')) as ExportMargin | undefined) ?? 'medium'
+  exportIncludeTitle = ((await window.api.getSettings('exportTitle')) as boolean | undefined) ?? true
+  exportIncludeIcon = ((await window.api.getSettings('exportIcon')) as boolean | undefined) ?? true
+  applyExportMenuState()
+
+  const wsModal = document.getElementById('workspace-modal') as HTMLElement
+  const showWsModal = (): void => {
+    wsModal.hidden = false
+    void (async () => {
+      const info = await window.api.wsGet()
+      ;(document.getElementById('ws-current') as HTMLElement).textContent = info.workspace ?? 'No workspace'
+    })()
+    ;(document.getElementById('create-name') as HTMLInputElement).focus()
+  }
+  // The header switcher opens the workspace dropdown (wired with the dropdown
+  // code below); the welcome screen still opens the create/open modal.
+  document.getElementById('welcome-create')!.addEventListener('click', showWsModal)
+  document.getElementById('welcome-open')!.addEventListener('click', () => void openExistingWorkspace())
+  document.getElementById('ws-modal-close')!.addEventListener('click', () => {
+    wsModal.hidden = true
+  })
+  wsModal.addEventListener('mousedown', (e) => {
+    if (e.target === wsModal) wsModal.hidden = true
+  })
+  document.getElementById('ws-open-existing')!.addEventListener('click', () => {
+    wsModal.hidden = true
+    void openExistingWorkspace()
+  })
+  document.getElementById('create-choose-loc')!.addEventListener('click', () => {
+    void (async () => {
+      const dir = await window.api.dirChoose()
+      if (dir) (document.getElementById('create-location') as HTMLInputElement).value = dir
+    })()
+  })
+  document.getElementById('create-submit')!.addEventListener('click', () => {
+    void (async () => {
+      const name = (document.getElementById('create-name') as HTMLInputElement).value.trim()
+      const parentDir = (document.getElementById('create-location') as HTMLInputElement).value.trim()
+      const isPrivate = (document.getElementById('create-private') as HTMLInputElement).checked
+      const err = document.getElementById('create-error') as HTMLElement
+      if (!name || !parentDir) {
+        err.textContent = 'Give the workspace a name and choose a location.'
+        err.hidden = false
+        return
+      }
+      if (isPrivate) {
+        wsModal.hidden = true
+        openPasswordGate({ mode: 'create' })
+        return
+      }
+      await window.api.wsCreateWorkspace({ name, parentDir })
+      wsModal.hidden = true
+      await initWorkspace()
+    })()
+  })
+  document.getElementById('create-convert')!.addEventListener('click', () => {
+    void (async () => {
+      const dir = await window.api.dirChoose()
+      if (!dir) return
+      await window.api.wsConvertWorkspace({ root: dir })
+      wsModal.hidden = true
+      await initWorkspace()
+    })()
+  })
+  document.getElementById('open-in-finder')!.addEventListener('click', () => void window.api.wsOpenInFinder())
+  const openExternal = (): void => {
+    void (async () => {
+      if (!currentFile && currentPdfPath) {
+        await window.api.openPath(currentPdfPath)
+        return
+      }
+      const rel = currentFile?.relPath ?? (document.getElementById('page-tree') as HTMLElement).dataset.currentRel
+      if (!rel) return
+      if (currentFile?.absolutePath && !rel.startsWith('/')) {
+        await window.api.openPath(currentFile.absolutePath)
+        return
+      }
+      if (rel.startsWith('/')) {
+        await window.api.openPath(rel)
+        return
+      }
+      const info = await window.api.wsGet()
+      if (info.workspace) await window.api.openPath(info.workspace + '/' + rel)
+    })()
+  }
+  document.getElementById('text-external')!.addEventListener('click', openExternal)
+  document.getElementById('pdf-external')!.addEventListener('click', openExternal)
+  document.getElementById('image-external')!.addEventListener('click', () => {
+    if (currentImagePath) void window.api.openPath(currentImagePath)
+  })
+
+  // ---- PDF toolbar ----
+  document.getElementById('pdf-zoom-in')!.addEventListener('click', () => pdfHandle?.zoom(0.15))
+  document.getElementById('pdf-zoom-out')!.addEventListener('click', () => pdfHandle?.zoom(-0.15))
+  document.getElementById('pdf-fit')!.addEventListener('click', () => pdfHandle?.fitWidth())
+
+  // ---- image toolbar ----
+  const imageZoomBy = (factor: number): void => {
+    imageZoom = Math.max(0.05, Math.min(8, imageZoom * factor))
+    applyImageZoom()
+  }
+  document.getElementById('image-zoom-in')!.addEventListener('click', () => imageZoomBy(1.25))
+  document.getElementById('image-zoom-out')!.addEventListener('click', () => imageZoomBy(0.8))
+  document.getElementById('image-fit')!.addEventListener('click', () => fitImage())
+  document.getElementById('image-actual')!.addEventListener('click', () => {
+    imageZoom = 1
+    applyImageZoom()
+  })
+  imageStageEl.addEventListener(
+    'wheel',
+    (e) => {
+      if (!e.metaKey && !e.ctrlKey) return
+      e.preventDefault()
+      imageZoomBy(e.deltaY < 0 ? 1.1 : 0.9)
+    },
+    { passive: false }
+  )
+  // drag anywhere in the stage to pan a zoomed-in image
+  let panning = false
+  let panStart = { x: 0, y: 0, left: 0, top: 0 }
+  imageStageEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return
+    panning = true
+    panStart = { x: e.clientX, y: e.clientY, left: imageStageEl.scrollLeft, top: imageStageEl.scrollTop }
+    imageStageEl.classList.add('panning')
+  })
+  window.addEventListener('mousemove', (e) => {
+    if (!panning) return
+    imageStageEl.scrollLeft = panStart.left - (e.clientX - panStart.x)
+    imageStageEl.scrollTop = panStart.top - (e.clientY - panStart.y)
+  })
+  window.addEventListener('mouseup', () => {
+    if (!panning) return
+    panning = false
+    imageStageEl.classList.remove('panning')
+  })
+  document.getElementById('new-root-page')!.addEventListener('click', () => void createNewPage('__root__'))
+  const pageTree = document.getElementById('page-tree') as HTMLElement
+  pageTree.addEventListener('contextmenu', (e) => {
+    const target = e.target as HTMLElement
+    const row = target.closest('.tree-item') as HTMLElement | null
+    if (row?.dataset.rel) {
+      e.preventDefault()
+      e.stopPropagation()
+      void window.api.showItemMenu({
+        relPath: row.dataset.rel,
+        kind: row.dataset.kind ?? 'page',
+        name: row.querySelector('.tree-label')?.textContent ?? undefined
+      })
+      return
+    }
+    if (target.closest('.tree-folder') || target.closest('.tree-branch')) return
+    e.preventDefault()
+    void createNewPage('__root__')
+  })
+  document.getElementById('settings-btn')!.addEventListener('click', () => void settingsApi.show())
+  document.getElementById('new-page-btn')!.addEventListener('click', () => void createNewPage(null))
+  document.getElementById('empty-new-page')!.addEventListener('click', () => void createNewPage(null))
+  document.getElementById('toggle-agent-btn')!.addEventListener('click', toggleAgentPanel)
+  document.getElementById('agent-close')!.addEventListener('click', toggleAgentPanel)
+  toggleSourceBtn.addEventListener('click', toggleSource)
+  document.getElementById('export-pdf-btn')!.addEventListener('click', (e) => {
+    e.stopPropagation()
+    toggleExportMenu()
+  })
+  const exportMenuEl = document.getElementById('export-menu') as HTMLElement
+  exportMenuEl.addEventListener('click', (e) => e.stopPropagation())
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('.export-seg-btn[data-margin]')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      exportMargin = (btn.dataset.margin as ExportMargin) ?? 'medium'
+      applyExportMenuState()
+      schedulePrintPreview(200)
+      void window.api.setSettings('exportMargin', exportMargin)
+    })
+  }
+  ;(document.getElementById('export-title') as HTMLInputElement).addEventListener('change', (e) => {
+    exportIncludeTitle = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('exportTitle', exportIncludeTitle)
+  })
+  ;(document.getElementById('export-icon') as HTMLInputElement).addEventListener('change', (e) => {
+    exportIncludeIcon = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('exportIcon', exportIncludeIcon)
+  })
+  document.getElementById('export-run')!.addEventListener('click', () => void exportPageToPdf())
+
+  // ---- page display options ----
+  const pageViewMenu = document.getElementById('page-view-menu') as HTMLElement
+  const pageViewBtn = document.getElementById('page-view-btn') as HTMLButtonElement
+  pageViewBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    applyExportMenuState()
+    applyPageDisplay()
+    pageViewMenu.hidden = !pageViewMenu.hidden
+    pageViewBtn.classList.toggle('open', !pageViewMenu.hidden)
+  })
+  pageViewMenu.addEventListener('click', (e) => e.stopPropagation())
+  ;(document.getElementById('pv-title') as HTMLInputElement).addEventListener('change', (e) => {
+    showPageTitle = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('showPageTitle', showPageTitle)
+    applyPageDisplay()
+  })
+  ;(document.getElementById('pv-icon') as HTMLInputElement).addEventListener('change', (e) => {
+    showPageIcon = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('showPageIcon', showPageIcon)
+    applyPageDisplay()
+  })
+  document.addEventListener('click', () => closePageViewMenu())
+  document.addEventListener('click', () => closeExportMenu())
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeExportMenu()
+  })
+  document.getElementById('action-add-icon')!.addEventListener('click', () => {
+    pageIconEl.click()
+  })
+  document.getElementById('action-copy-path')!.addEventListener('click', () => {
+    if (!currentPage) return
+    const text = (currentPage.absolutePath || currentPage.relPath)
+    void navigator.clipboard.writeText(text).catch(() => {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    })
+    setSaveStatus('Path copied', 'ok')
+    window.setTimeout(() => setSaveStatus(''), 1500)
+  })
+
+  const search = document.getElementById('page-search') as HTMLInputElement
+  search.addEventListener('input', () => {
+    refreshTree()
+  })
+
+  const agentApi = setupAgentPanel({
+    workspace: res.workspace,
+    getContext: () => activeContext(),
+    onNeedSettings: () => void settingsApi.show(),
+    getAgentSettings: async () => ({
+      provider: ((await window.api.getSettings('agentProvider')) as string) || 'anthropic',
+      model: ((await window.api.getSettings('agentModel')) as string) || '',
+      apiKey: ((await window.api.getSettings('agentApiKey')) as string) || ''
+    })
+  })
+
+  const sizeSelect = document.getElementById('size-select') as HTMLSelectElement
+  for (const s of RENDER_SIZES) {
+    const opt = document.createElement('option')
+    opt.value = s.id
+    opt.textContent = s.label
+    sizeSelect.appendChild(opt)
+  }
+  sizeSelect.value = ((await window.api.getSettings('renderFontSize')) as string | undefined) ?? 'm'
+  applyRenderSize(sizeSelect.value)
+  sizeSelect.addEventListener('change', () => {
+    applyRenderSize(sizeSelect.value)
+    void window.api.setSettings('renderFontSize', sizeSelect.value)
+    schedulePrintPreview(250)
+  })
+
+  const fontSelect = document.getElementById('font-select') as HTMLSelectElement
+  fillFontSelect(fontSelect, (await window.api.getSettings('previewFont')) as string | undefined)
+  fontSelect.addEventListener('change', () => applyPreviewFont(fontSelect.value))
+
+  const settingsApi = setupSettings({
+    onWorkspaceChanged: () => void initWorkspace(),
+    onAgentSettingsChanged: () => void agentApi.restart(),
+    onThemeChange: (id) => setTheme(id),
+    onFontChange: (id) => applyPreviewFont(id)
+  })
+  restartAgentPanel = () => agentApi.restart()
+  // First run: ask for one endpoint + key + model, then wire the agent to it.
+  const onboarding = setupOnboarding({
+    onConfigured: () => {
+      void agentApi.restart()
+      restartAgentPanel?.()
+    }
+  })
+  await onboarding.maybeShow()
+  buildThemeSelect()
+  const savedSplitRatio = (await window.api.getSettings('splitRatio')) as number | undefined
+  if (typeof savedSplitRatio === 'number' && savedSplitRatio > 0.2 && savedSplitRatio < 0.8) {
+    splitRatio = savedSplitRatio
+  }
+  applySplitRatio()
+  watchOutline()
+  setSidebarOpen(((await window.api.getSettings('sidebarOpen')) as boolean | undefined) !== false, false)
+  window.addEventListener('yestion:tree-changed', () => void refreshTree())
+  // Actions coming back from the native right-click menu.
+  window.api.onItemAction(({ action, relPath, kind }) => {
+    void (async () => {
+      if (action === 'open') await openRel(relPath, kind, false)
+      else if (action === 'new-tab') await openRel(relPath, kind, true)
+      else if (action === 'reveal') await window.api.revealPath(relPath)
+      else if (action === 'copy-path') await window.api.copyPath(relPath)
+      else if (action === 'copy-link') {
+        const title = kind === 'page' ? (await window.api.wsRead(relPath))?.title ?? relPath : relPath
+        await navigator.clipboard.writeText('[[' + title + ']]')
+      } else if (action === 'close-tab') {
+        const i = tabs.findIndex((t) => t.relPath === relPath)
+        if (i >= 0) closeTab(i)
+      } else if (action === 'close-others') {
+        tabs = tabs.filter((t) => t.relPath === relPath)
+        activeTab = 0
+        renderTabs()
+        persistTabs()
+        if (tabs[0]) await activateTab(0)
+        else showNoTabs()
+      }
+    })()
+  })
+
+  window.addEventListener('yestion:open-page', (e) => {
+    const { rel, kind, newTab } = (e as CustomEvent<{ rel: string; kind: string; newTab?: boolean }>).detail
+    if (kind === 'binary') void openBinaryFile(rel)
+    else void openRel(rel, kind, newTab === true)
+  })
+
+  const sidebarW = (await window.api.getSettings('sidebarWidth')) as number | undefined
+  const agentW = (await window.api.getSettings('agentWidth')) as number | undefined
+  if (typeof sidebarW === 'number') (document.getElementById('sidebar') as HTMLElement).style.flexBasis = sidebarW + 'px'
+  if (typeof agentW === 'number') (document.getElementById('agent-panel') as HTMLElement).style.flexBasis = agentW + 'px'
+  attachResizer('sidebar-resizer', 'sidebar', 'sidebarWidth', 160, 480)
+  attachResizer('agent-resizer', 'agent-panel', 'agentWidth', 260, 640)
+
+  const agentOpen = (await window.api.getSettings('agentOpen')) as boolean | undefined
+  ;(document.getElementById('agent-panel') as HTMLElement).hidden = agentOpen !== true
+  ;(document.getElementById('agent-resizer') as HTMLElement).hidden = agentOpen !== true
+  ;(document.getElementById('toggle-agent-btn') as HTMLElement).classList.toggle('active', agentOpen === true)
+
+  await initWorkspace()
+}
+
+void init()

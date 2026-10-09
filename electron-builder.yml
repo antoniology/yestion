@@ -1,0 +1,84 @@
+# Packaging for Yestion (electron-builder).
+#
+# Targets:
+#   npm run dist:mac      → dist/Yestion-<version>-arm64.dmg  (+ .zip for updates)
+#   npm run dist:mac:x64  → Intel build
+#   npm run dist:mac:universal → both architectures in one app (slow, ~1 GB)
+#
+# Notes for a public release:
+#   * Unsigned builds open with a Gatekeeper warning. For a clean experience you
+#     need an Apple Developer ID and notarization — see docs/PACKAGING.md.
+#   * `files` below trims the dependency tree aggressively (docs, sources, maps,
+#     tests). Anything that must stay at runtime is listed explicitly.
+appId: com.hacker.yestion
+productName: Yestion
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: resources
+
+# The renderer bundle and the main process live in out/ — everything else in the
+# package is runtime dependencies.
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.{md,markdown,map,ts,tsx,flow}'
+  - '!**/{test,tests,__tests__,spec,specs,example,examples,doc,docs,benchmark,benchmarks}/**'
+  - '!**/{.github,.vscode,.idea,.git}/**'
+  - '!node_modules/**/{CHANGELOG,README,LICENSE,LICENCE,AUTHORS,NOTICE}*'
+  - '!node_modules/**/*.{d.ts,d.mts,d.cts}'
+  # OpenAI's SDK ships its TypeScript sources and JSON metadata that the runtime
+  # never reads (we talk to providers through pi's model layer).
+  - '!node_modules/openai/src/**'
+  - '!node_modules/openai/_vendor/**'
+  - '!node_modules/@anthropic-ai/sdk/src/**'
+  - '!node_modules/typebox/build/**'
+  - '!node_modules/@earendil-works/pi-coding-agent/{docs,examples}/**'
+  # Unused sibling packages (the app only imports pi-coding-agent).
+  - '!node_modules/@earendil-works/{pi-server,pi-telemetry,pi-protocol}/**'
+
+asar: true
+
+# Ship one locale's resources; the UI is English and this trims ~40 MB.
+electronLanguages:
+  - en
+
+mac:
+  category: public.app-category.productivity
+  icon: resources/icon.icns
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  # The app reads and writes the user's notes anywhere on disk, and the agent
+  # runs shell commands — deliberately not sandboxed, like a code editor.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  extendInfo:
+    NSDesktopFolderUsageDescription: Yestion works on folders of markdown files you choose.
+    NSDocumentsFolderUsageDescription: Yestion works on folders of markdown files you choose.
+    NSDownloadsFolderUsageDescription: Yestion can open attachments from your Downloads folder.
+    NSAppleEventsUsageDescription: Yestion asks other apps to open files you click in a page.
+
+dmg:
+  title: Yestion ${version}
+  icon: resources/icon.icns
+  background: null
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 140
+      y: 190
+      type: file
+    - x: 400
+      y: 190
+      type: link
+      path: /Applications
+
+# Auto-update feed (only used once you publish releases somewhere).
+publish: null
