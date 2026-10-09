@@ -198,15 +198,6 @@ function pageRow(
   return row
 }
 
-// Re-render the tree whenever the workspace changes (deletes, creates, saves).
-window.addEventListener('yestion:tree-changed', () => {
-  void (async () => {
-    const tree = await window.api.wsTree()
-    const current = (document.getElementById('page-tree') as HTMLElement).dataset.currentRel ?? null
-    setupSidebar(tree, {
-      currentRel: current,
-      onOpen: (rel, kind, newTab) =>
-        window.dispatchEvent(new CustomEvent('yestion:open-page', { detail: { rel, kind, newTab } }))
-    })
-  })()
-})
+// The tree is re-rendered by the single `yestion:tree-changed` listener in
+// main.ts (which routes opens through the split-pane logic). Listening here too
+// meant every structural change rebuilt the tree twice.

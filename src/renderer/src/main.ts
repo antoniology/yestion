@@ -84,6 +84,43 @@ const lastPersistedBody = new Map<string, string>()
 let saveTimer: number | null = null
 const SAVE_DEBOUNCE_MS = 1200
 
+// ---- page content cache ----
+// Tab switching and back/forward re-open the same pages constantly; re-reading
+// every one from disk (and re-parsing it in both editors) on each click is the
+// main reason navigation didn't feel instant. The watcher invalidates entries
+// changed outside the app and saves refresh them in place, so a hit is always
+// at least as fresh as the tree the user is clicking.
+type CachedPage = NonNullable<Awaited<ReturnType<typeof window.api.wsRead>>>
+const pageCache = new Map<string, CachedPage>()
+/** Workspace the cache belongs to — different workspaces reuse relative paths. */
+let cacheWorkspacePath: string | null = null
+const PAGE_CACHE_MAX = 64
+function cachePage(page: CachedPage): void {
+  pageCache.delete(page.relPath)
+  pageCache.set(page.relPath, page)
+  if (pageCache.size <= PAGE_CACHE_MAX) return
+  for (const key of pageCache.keys()) {
+    // Never evict the page on screen or the one just cached.
+    if (key === currentPage?.relPath || key === page.relPath) continue
+    pageCache.delete(key)
+    break
+  }
+}
+function dropCachedPage(rel: string): void {
+  pageCache.delete(rel)
+}
+async function fetchPageEntry(rel: string): Promise<CachedPage | null> {
+  const cached = pageCache.get(rel)
+  // A page with unwritten edits must come from disk: the queued write is sent
+  // before this read, so the main process returns the newest bytes. Serving the
+  // cache here would show the user their pre-edit copy.
+  if (cached && !isPending(rel) && !saveQueue.some((j) => j.relPath === rel)) return cached
+  const page = await window.api.wsRead(rel)
+  if (!page) return null
+  cachePage(page)
+  return page
+}
+
 function nextRev(): number {
   return ++revCounter
 }
@@ -129,13 +166,17 @@ async function drainSaveQueue(): Promise<void> {
     if (!ok) throw new Error('save rejected')
     savedRev.set(job.relPath, job.rev)
     lastPersistedBody.set(job.relPath, job.body)
+    // Refresh the cached copy so reopening this page stays a hit and shows the
+    // title/icon the user just saved.
+    const cached = pageCache.get(job.relPath)
+    if (cached) pageCache.set(job.relPath, { ...cached, title: job.title, icon: job.icon, body: job.body })
     if (currentPage?.relPath === job.relPath) {
       if (!isPending(job.relPath)) {
         setSaveStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
       }
-      // Keep sidebar labels in sync with title/icon edits. (Structural scans are
-      // cheap once the tree-revision check is in place.)
-      queueTreeRefresh()
+      // Keep the sidebar row in sync with title/icon edits without re-reading
+      // every file in the workspace (that is what made saving feel heavy).
+      updateTreeLabel(job.relPath, job.title, job.icon)
     }
   } catch (err) {
     console.error('[yestion] save failed:', err)
@@ -218,8 +259,17 @@ function getActiveBody(): string {
 function loadIntoEditors(markdown: string): void {
   programmatic = true
   try {
-    richEditor.setContent(markdown)
-    codeEditor.setContent(markdown)
+    // Fill only the surface(s) the user can actually see. The hidden editor is
+    // written by applyViewMode when it becomes visible, so parsing both on
+    // every open was pure waste.
+    if (viewMode === 'split') {
+      richEditor.setContent(markdown)
+      codeEditor.setContent(markdown)
+    } else if (viewMode === 'source') {
+      codeEditor.setContent(markdown)
+    } else {
+      richEditor.setContent(markdown)
+    }
   } finally {
     programmatic = false
   }
@@ -275,6 +325,16 @@ const pageOpts: YestionPageOpts = {
 // save would recreate the page at its old location.
 window.api.onPageMoved((moves) => {
   for (const move of moves) {
+    // Follow the cached bytes to the new path so the next open is still a hit.
+    const cached = pageCache.get(move.from)
+    if (cached) {
+      pageCache.delete(move.from)
+      pageCache.set(move.to, {
+        ...cached,
+        relPath: move.to,
+        absolutePath: cached.absolutePath.replace(move.from, move.to)
+      })
+    }
     for (const tab of tabs) {
       if (tab.relPath === move.from) tab.relPath = move.to
     }
@@ -300,6 +360,7 @@ window.api.onPageMoved((moves) => {
 
 // The agent (or Finder) edits files on disk; refresh what the user sees.
 window.api.onWsExternalChange((rel) => {
+  dropCachedPage(rel)
   void (async () => {
     await refreshTree()
     if (currentFile && rel === currentFile.relPath && !fileDirty) {
@@ -362,13 +423,18 @@ function dirOf(relPath: string): string {
   return relPath.includes('/') ? relPath.replace(/\/[^/]*$/, '') : ''
 }
 
+// Every async open bumps this; a slower load that finishes after a newer click
+// would otherwise flash its stale content over the page the user just opened.
+let loadSeq = 0
+
 async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Promise<void> {
   // Queue the current page's pending edits BEFORE switching. The snapshot is
   // captured synchronously here, so navigation never waits on the disk write
   // and can't drop a debounced edit.
   flushSave()
-  const page = await window.api.wsRead(relPath)
-  if (!page) return
+  const seq = ++loadSeq
+  const page = await fetchPageEntry(relPath)
+  if (!page || seq !== loadSeq) return
   recordNav({ rel: page.relPath, kind: 'page', title: page.title })
   currentPage = { ...page, dirRel: dirOf(relPath) }
   // A freshly loaded page has no unwritten edits.
@@ -386,7 +452,7 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   pageIconEl.textContent = page.icon
   pageIconEl.classList.toggle('no-icon', !page.icon)
   pageTitleEl.value = page.title
-  ;(document.getElementById('page-tree') as HTMLElement).dataset.currentRel = page.relPath
+  markActiveInTree(page.relPath)
   if (opts.tab !== false) upsertActiveTab({ relPath: page.relPath, kind: 'page', title: page.title, icon: page.icon })
   ;(document.getElementById('crumb-bar') as HTMLElement).hidden = false
   if (!findBarEl.hidden) closeFind()
@@ -402,7 +468,6 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   ;(document.querySelector('.page-scroll') as HTMLElement).classList.remove('split-view')
   loadIntoEditors(page.body)
   window.scrollTo(0, 0)
-  await refreshTree()
 }
 
 // ---------------------------------------------------------------------------
@@ -512,80 +577,121 @@ function persistTabs(): void {
   void window.api.setSettings('activeTab', activeTab)
 }
 
+/** Index of the tab a tab element currently represents (tab paths are unique). */
+function tabIndexForEl(el: HTMLElement): number {
+  return tabs.findIndex((t) => t.relPath === el.dataset.rel)
+}
+
+// Built once per element; every handler resolves its tab by relPath at event
+// time so the listener survives reordering and reuse.
+function makeTabEl(): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'tab'
+  el.draggable = true
+  const icon = document.createElement('span')
+  icon.className = 'tab-icon'
+  const label = document.createElement('span')
+  label.className = 'tab-label'
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'tab-close'
+  close.textContent = '✕'
+  close.title = 'Close tab'
+  close.addEventListener('click', (e) => {
+    e.stopPropagation()
+    const i = tabIndexForEl(el)
+    if (i >= 0) closeTab(i)
+  })
+  el.append(icon, label, close)
+  el.addEventListener('click', () => {
+    const i = tabIndexForEl(el)
+    if (i < 0) return
+    const tab = tabs[i]
+    // In split view the tab strip belongs to the active pane: clicking a tab
+    // puts it in the pane the user is working in.
+    if (splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
+      void setSplitTarget(tab.relPath, tab.kind, tab.title)
+      return
+    }
+    void activateTab(i)
+  })
+  el.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault()
+      const i = tabIndexForEl(el)
+      if (i >= 0) closeTab(i)
+    }
+  })
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    const i = tabIndexForEl(el)
+    if (i < 0) return
+    const tab = tabs[i]
+    void window.api.showItemMenu({ relPath: tab.relPath, kind: tab.kind, name: tab.title, isTab: true })
+  })
+  el.addEventListener('dragstart', (e) => {
+    const i = tabIndexForEl(el)
+    if (i >= 0) e.dataTransfer?.setData('text/yestion-tab', String(i))
+  })
+  el.addEventListener('dragover', (e) => e.preventDefault())
+  el.addEventListener('drop', (e) => {
+    e.preventDefault()
+    const from = Number(e.dataTransfer?.getData('text/yestion-tab') ?? '-1')
+    const i = tabIndexForEl(el)
+    if (from < 0 || i < 0 || from === i) return
+    const [moved] = tabs.splice(from, 1)
+    tabs.splice(i, 0, moved)
+    activeTab = tabs.indexOf(moved)
+    renderTabs()
+    persistTabs()
+  })
+  return el
+}
+
+let tabAddEl: HTMLButtonElement | null = null
+
 function renderTabs(): void {
   tabBarEl.hidden = tabs.length === 0
   renderOpenEditors()
-  tabBarEl.innerHTML = ''
-  if (tabs.length === 0) return
-  tabs.forEach((tab, i) => {
-    const el = document.createElement('div')
-    const leftRel = tabs[activeTab]?.relPath
-    const activeRel = splitOpen && activePane === 'right' ? splitRel : leftRel
-    const otherRel = splitOpen ? (activePane === 'right' ? leftRel : splitRel) : null
+  // Reconcile keyed by relPath: repainting on a click must not detach and
+  // rebuild every tab node (and its six listeners) each time.
+  const byRel = new Map<string, HTMLElement>()
+  for (const child of Array.from(tabBarEl.children) as HTMLElement[]) {
+    if (child.classList.contains('tab') && child.dataset.rel) byRel.set(child.dataset.rel, child)
+  }
+  const leftRel = tabs[activeTab]?.relPath
+  const activeRel = splitOpen && activePane === 'right' ? splitRel : leftRel
+  const otherRel = splitOpen ? (activePane === 'right' ? leftRel : splitRel) : null
+  const seen = new Set<string>()
+  for (const tab of tabs) {
+    let el = byRel.get(tab.relPath)
+    if (!el) {
+      el = makeTabEl()
+      el.dataset.rel = tab.relPath
+    }
+    seen.add(tab.relPath)
     el.className =
       'tab' +
       (tab.relPath === activeRel ? ' active' : '') +
       (otherRel && tab.relPath === otherRel ? ' in-split' : '')
-    el.draggable = true
     el.title = tab.relPath
-    const icon = document.createElement('span')
-    icon.className = 'tab-icon'
-    icon.textContent = tabIconFor(tab)
-    const label = document.createElement('span')
-    label.className = 'tab-label'
-    label.textContent = tab.title
-    const close = document.createElement('button')
-    close.type = 'button'
-    close.className = 'tab-close'
-    close.textContent = '✕'
-    close.title = 'Close tab'
-    close.addEventListener('click', (e) => {
-      e.stopPropagation()
-      closeTab(i)
-    })
-    el.append(icon, label, close)
-    el.addEventListener('click', () => {
-      // In split view the tab strip belongs to the active pane: clicking a tab
-      // puts it in the pane the user is working in.
-      if (splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
-        void setSplitTarget(tab.relPath, tab.kind, tab.title)
-        return
-      }
-      void activateTab(i)
-    })
-    el.addEventListener('auxclick', (e) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        closeTab(i)
-      }
-    })
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault()
-      void window.api.showItemMenu({ relPath: tab.relPath, kind: tab.kind, name: tab.title, isTab: true })
-    })
-    el.addEventListener('dragstart', (e) => {
-      e.dataTransfer?.setData('text/yestion-tab', String(i))
-    })
-    el.addEventListener('dragover', (e) => e.preventDefault())
-    el.addEventListener('drop', (e) => {
-      e.preventDefault()
-      const from = Number(e.dataTransfer?.getData('text/yestion-tab') ?? '-1')
-      if (from < 0 || from === i) return
-      const [moved] = tabs.splice(from, 1)
-      tabs.splice(i, 0, moved)
-      activeTab = tabs.indexOf(moved)
-      renderTabs()
-      persistTabs()
-    })
-    tabBarEl.appendChild(el)
-  })
-  const add = document.createElement('button')
-  add.type = 'button'
-  add.className = 'tab-add'
-  add.textContent = '＋'
-  add.title = 'New tab (⌘T)'
-  add.addEventListener('click', () => void newTab())
-  tabBarEl.appendChild(add)
+    ;(el.querySelector('.tab-icon') as HTMLElement).textContent = tabIconFor(tab)
+    ;(el.querySelector('.tab-label') as HTMLElement).textContent = tab.title
+    tabBarEl.appendChild(el) // re-appending moves the node into place (order = tabs)
+  }
+  for (const [rel, el] of byRel) {
+    if (!seen.has(rel)) el.remove()
+  }
+  if (tabs.length === 0) return
+  if (!tabAddEl) {
+    tabAddEl = document.createElement('button')
+    tabAddEl.type = 'button'
+    tabAddEl.className = 'tab-add'
+    tabAddEl.textContent = '＋'
+    tabAddEl.title = 'New tab (⌘T)'
+    tabAddEl.addEventListener('click', () => void newTab())
+  }
+  tabBarEl.appendChild(tabAddEl)
 }
 
 function upsertActiveTab(info: TabInfo): void {
@@ -905,14 +1011,14 @@ async function flushTextFile(): Promise<void> {
     ok ? 'Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Save failed',
     ok ? 'ok' : 'error'
   )
-  if (ok) window.setTimeout(() => void refreshTree(), 80)
 }
 
 async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
   recordNav({ rel: pathOrRel, kind: 'file', title: pathOrRel })
   if (fileDirty) await flushTextFile()
+  const seq = ++loadSeq
   const res = await window.api.readTextFile(pathOrRel)
-  if (!res) return
+  if (!res || seq !== loadSeq) return
   const pathOrRel2 = pathOrRel
   currentPage = null
   releasePdfViewer()
@@ -946,9 +1052,8 @@ async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Pr
   crumb.className = 'crumb'
   crumb.textContent = name
   breadcrumbsEl.appendChild(crumb)
-  ;(document.getElementById('page-tree') as HTMLElement).dataset.currentRel = pathOrRel
+  markActiveInTree(pathOrRel)
   if (opts.tab !== false) upsertActiveTab({ relPath: pathOrRel, kind: 'file', title: name })
-  await refreshTree()
 }
 
 // Any in-page file reference (📎 chips, [text](file.pdf) links) opens in the
@@ -996,7 +1101,9 @@ async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise
   recordNav({ rel: pathOrRel, kind: 'pdf', title: pathOrRel })
   if (fileDirty) await flushTextFile()
   flushSave()
+  const seq = ++loadSeq
   const info = await window.api.wsGet()
+  if (seq !== loadSeq) return
   const abs = pathOrRel.startsWith('/')
     ? pathOrRel
     : info.workspace
@@ -1082,6 +1189,7 @@ async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promi
   recordNav({ rel: pathOrRel, kind: 'image', title: pathOrRel })
   if (fileDirty) await flushTextFile()
   flushSave()
+  const seq = ++loadSeq
   const info = await window.api.wsGet()
   const abs = pathOrRel.startsWith('/')
     ? pathOrRel
@@ -1089,6 +1197,7 @@ async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promi
       ? info.workspace + '/' + pathOrRel
       : pathOrRel
   const res = await window.api.readImage(abs)
+  if (seq !== loadSeq) return
   if (!res) {
     await window.api.openPath(abs)
     return
@@ -1238,6 +1347,33 @@ function findParentOf(node: SidebarNodeLike, target: SidebarNodeLike): SidebarNo
   return null
 }
 
+// Opening a page or saving its content must not re-read every file in the
+// workspace and rebuild the whole tree. These helpers touch only the rows that
+// actually changed: the active highlight, and one page's label/icon.
+function treeRow(rel: string): HTMLElement | null {
+  const nav = document.getElementById('page-tree')
+  if (!nav) return null
+  return nav.querySelector<HTMLElement>(`.tree-item[data-rel="${CSS.escape(rel)}"]`)
+}
+function markActiveInTree(rel: string | null): void {
+  const nav = document.getElementById('page-tree') as HTMLElement | null
+  if (!nav) return
+  if (rel) nav.dataset.currentRel = rel
+  for (const row of nav.querySelectorAll<HTMLElement>('.tree-item.active')) {
+    row.classList.remove('active')
+  }
+  if (!rel) return
+  treeRow(rel)?.classList.add('active')
+}
+function updateTreeLabel(rel: string, title: string, icon: string): void {
+  const row = treeRow(rel)
+  if (!row) return
+  const label = row.querySelector<HTMLElement>('.tree-label')
+  if (label) label.textContent = title
+  const iconEl = row.querySelector<HTMLElement>('.tree-icon')
+  if (iconEl) iconEl.textContent = icon || ''
+}
+
 async function refreshTree(): Promise<void> {
   const tree = await window.api.wsTree()
   lastRoot = tree
@@ -1250,8 +1386,10 @@ async function refreshTree(): Promise<void> {
         void setSplitTarget(rel, kind)
         return
       }
-      if (kind === 'pdf') void openPdf(rel)
-      else void openPageByRel(rel)
+      // openRel is the canonical router: it dedupes tabs, honours ⌘-click, and
+      // dispatches each kind (page / pdf / image / file) to the right viewer.
+      if (kind === 'binary') void openBinaryFile(rel)
+      else void openRel(rel, kind, newTab === true)
     }
   })
 }
@@ -2867,11 +3005,13 @@ function renderSearchResults(): void {
       snippet.textContent = text
     }
     row.append(icon, title, snippet)
-    row.addEventListener('mousemove', () => {
-      if (searchActive !== i) {
-        searchActive = i
-        renderSearchResults()
-      }
+    row.addEventListener('mouseover', () => {
+      if (searchActive === i) return
+      searchActive = i
+      // Paint just the highlight — rebuilding every result row on each pointer
+      // move made hovering a long result list feel like molasses.
+      for (const el of searchResultsEl.querySelectorAll('.search-hit.active')) el.classList.remove('active')
+      row.classList.add('active')
     })
     row.addEventListener('mousedown', (e) => {
       e.preventDefault()
@@ -3124,6 +3264,11 @@ async function initWorkspace(): Promise<void> {
   const res = await window.api.wsGet()
   if (seq !== bootSeq) return // superseded by a newer boot
   const base = res.workspace
+  if (base !== cacheWorkspacePath) {
+    // A different workspace may reuse the same relative paths — start clean.
+    pageCache.clear()
+    cacheWorkspacePath = base
+  }
   if (!base) {
     welcomeEl.hidden = false
     pageViewEl.hidden = true
@@ -3134,6 +3279,7 @@ async function initWorkspace(): Promise<void> {
   const info = await window.api.wsGet()
   if (info.locked && info.displayPath) {
     // Encrypted workspace that hasn't been unlocked in this run.
+    pageCache.clear() // never keep decrypted pages resident once locked
     const lockedView = document.getElementById('locked-view') as HTMLElement
     ;(document.getElementById('locked-title') as HTMLElement).textContent = info.displayPath.split('/').pop()?.replace(/^\./, '').replace(/\.yestion$/, '') || 'Private workspace'
     lockedView.hidden = false
@@ -3477,8 +3623,15 @@ async function init(): Promise<void> {
   })
 
   const search = document.getElementById('page-search') as HTMLInputElement
+  // Filtering the tree re-reads the workspace, so debounce so typing a word
+  // costs one scan instead of one per keystroke.
+  let searchDebounce: number | null = null
   search.addEventListener('input', () => {
-    refreshTree()
+    if (searchDebounce !== null) window.clearTimeout(searchDebounce)
+    searchDebounce = window.setTimeout(() => {
+      searchDebounce = null
+      void refreshTree()
+    }, 150)
   })
 
   const agentApi = setupAgentPanel({
@@ -3557,12 +3710,6 @@ async function init(): Promise<void> {
         else showNoTabs()
       }
     })()
-  })
-
-  window.addEventListener('yestion:open-page', (e) => {
-    const { rel, kind, newTab } = (e as CustomEvent<{ rel: string; kind: string; newTab?: boolean }>).detail
-    if (kind === 'binary') void openBinaryFile(rel)
-    else void openRel(rel, kind, newTab === true)
   })
 
   const sidebarW = (await window.api.getSettings('sidebarWidth')) as number | undefined
