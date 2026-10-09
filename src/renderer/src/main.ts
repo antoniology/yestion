@@ -1,4 +1,4 @@
-import { createRichEditor, type RichEditor, type YestionPageOpts } from './wysiwyg'
+import { createRichEditor, localFileUrl, type RichEditor, type YestionPageOpts } from './wysiwyg'
 import { createEditor, type MarkdownEditor } from './editor'
 import { applyTheme, getTheme, nextTheme, THEMES } from './themes'
 import { fillFontSelect, fontById } from './fonts'
@@ -1355,7 +1355,9 @@ interface SidebarNodeLike {
   name: string
   relPath: string
   dirRel?: string
-  kind: 'page' | 'folder' | 'pdf' | 'file' | 'binary'
+  // Must cover every kind the main process can emit (see workspace.ts) —
+  // 'image' was missing here and in the preload type.
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
   title?: string
   icon?: string
   children?: SidebarNodeLike[]
@@ -1701,7 +1703,7 @@ function showCrumbPop(anchor: HTMLElement, node: SidebarNodeLike): void {
   closeCrumbPop()
   if (!lastRoot) return
   const parent = findParentOf(lastRoot, node) ?? lastRoot
-  const rows = (parent.children ?? []).filter((c) => c.kind !== 'pdf' || true)
+  const rows = parent.children ?? []
   crumbPop = document.createElement('div')
   crumbPop.className = 'crumb-pop'
   const renderRows = (list: SidebarNodeLike[], highlightRel: string | null): void => {
@@ -1830,7 +1832,7 @@ window.api.onMenuAction((action) => {
       break
     case 'find':
       if (findBarEl.hidden) openFind()
-      else closeFind()
+      else closeFind(true)
       break
     case 'find-workspace':
       openSearch()
@@ -1854,9 +1856,13 @@ window.api.onMenuAction((action) => {
     case 'reveal-page':
       if (currentPage) void window.api.wsReveal(currentPage.relPath)
       break
-    case 'toggle-sidebar':
-      document.getElementById('sidebar')!.hidden = !document.getElementById('sidebar')!.hidden
+    case 'toggle-sidebar': {
+      // Must go through setSidebarOpen: the resizer and the persisted setting
+      // live there, and the toolbar button reads its state from `hidden`.
+      const sb = document.getElementById('sidebar') as HTMLElement
+      setSidebarOpen(sb.hidden as boolean, true)
       break
+    }
     case 'toggle-agent':
       toggleAgentPanel()
       break
@@ -2215,6 +2221,8 @@ let printPreviewOn = false
 let printPreviewTimer: number | null = null
 let printPreviewBusy = false
 let printPreviewAgain = false
+/** Page + margin + body that the pane is currently showing (see refreshPrintPreview). */
+let printPreviewToken: string | null = null
 
 // What the page shows while writing: the title and icon can be hidden.
 let showPageTitle = true
@@ -2240,9 +2248,15 @@ function closePageViewMenu(): void {
 }
 
 /** Render the current page through the print pipeline into the right pane. */
-async function refreshPrintPreview(): Promise<void> {
+async function refreshPrintPreview(force = false): Promise<void> {
   if (!printPreviewOn || !currentPage) return
   if (splitRightEl.hidden) return
+  // printToPDF + a pdf.js render is by far the most expensive thing the editor
+  // does, and it used to run on every 700 ms typing pause even when nothing had
+  // changed since the last render. Content, page and margin together identify
+  // exactly what is on screen; anything else is a no-op.
+  const token = `${currentPage.relPath}\u0000${exportMargin}\u0000${getActiveBody()}`
+  if (!force && token === printPreviewToken) return
   if (printPreviewBusy) {
     printPreviewAgain = true
     return
@@ -2285,6 +2299,7 @@ async function refreshPrintPreview(): Promise<void> {
       }
     })
     splitBodyEl.scrollTop = scrollTop
+    printPreviewToken = token
     logLine('info', `print preview rendered (${bytes.byteLength} bytes)`)
   } catch (err) {
     console.error('[yestion] print preview failed:', err)
@@ -2322,6 +2337,9 @@ function schedulePrintPreview(delay = 700): void {
 
 function openPrintPreview(): void {
   printPreviewOn = true
+  // The pane starts empty, so whatever the token says about the last render no
+  // longer describes what's on screen.
+  printPreviewToken = null
   splitOpen = true
   splitRightEl.hidden = false
   splitResizerEl.hidden = false
@@ -2342,6 +2360,7 @@ function openPrintPreview(): void {
 
 function closePrintPreview(): void {
   printPreviewOn = false
+  printPreviewToken = null
   if (printPreviewTimer !== null) {
     window.clearTimeout(printPreviewTimer)
     printPreviewTimer = null
@@ -2509,14 +2528,7 @@ function applySplitRatio(): void {
 function splitIconFor(kind: string): string {
   if (kind === 'pdf') return '📕'
   if (kind === 'image') return '🖼'
-  if (kind === 'file' || kind === 'binary') return '📄'
   return '📄'
-}
-
-function toFileUrl(p: string): string {
-  if (/^(https?:|data:|file:|blob:)/i.test(p)) return p
-  const clean = p.replace(/^file:\/\//, '')
-  return 'file://' + clean.split('/').map((seg, i) => (i === 0 ? seg : encodeURIComponent(seg))).join('/')
 }
 
 function setActivePane(pane: 'left' | 'right'): void {
@@ -2622,7 +2634,7 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
     const abs = info.workspace && !rel.startsWith('/') ? info.workspace + '/' + rel : rel
     const img = document.createElement('img')
     img.className = 'split-image'
-    img.src = toFileUrl(abs)
+    img.src = localFileUrl(abs)
     splitBodyEl.appendChild(img)
     return
   }
@@ -2923,6 +2935,15 @@ function placeFindBar(): void {
   findBarEl.style.top = top + 'px'
 }
 
+/** Hand focus back to the document. The find bar and search modal steal focus
+ *  when they open, so dismissing them used to leave the caret nowhere and the
+ *  next keystroke went into the void. */
+function focusEditorSurface(): void {
+  if (pageViewEl.hidden) return // a PDF / text / image tab is the visible one
+  if (viewMode === 'source') codeEditor.view.focus()
+  else richEditor.focus()
+}
+
 function openFind(): void {
   findBarEl.hidden = false
   placeFindBar()
@@ -2931,11 +2952,14 @@ function openFind(): void {
   if (findInputEl.value.trim()) runFind()
 }
 
-function closeFind(): void {
+/** `restoreFocus` is false when the caller is about to show a different page
+ *  anyway (opening one closes the bar as a side effect). */
+function closeFind(restoreFocus = false): void {
   findBarEl.hidden = true
   findRanges = []
   clearFindHighlights()
   findCountEl.textContent = ''
+  if (restoreFocus) focusEditorSurface()
 }
 
 findInputEl.addEventListener('input', () => {
@@ -2952,7 +2976,7 @@ findInputEl.addEventListener('keydown', (e) => {
     stepFind(e.shiftKey ? -1 : 1)
   } else if (e.key === 'Escape') {
     e.preventDefault()
-    closeFind()
+    closeFind(true)
   }
 })
 
@@ -2962,7 +2986,7 @@ window.addEventListener('resize', () => {
 
 document.getElementById('find-next')!.addEventListener('click', () => stepFind(1))
 document.getElementById('find-prev')!.addEventListener('click', () => stepFind(-1))
-document.getElementById('find-close')!.addEventListener('click', () => closeFind())
+document.getElementById('find-close')!.addEventListener('click', () => closeFind(true))
 
 // ---------------------------------------------------------------------------
 // Workspace search (⌘⇧F): page titles, file names and markdown content.
@@ -3023,7 +3047,7 @@ function renderSearchResults(): void {
       (parent ? ` <span class="search-hit-path">${escapeHtml(parent)}</span>` : '')
     const snippet = document.createElement('span')
     snippet.className = 'search-hit-snippet'
-    const text = hit.snippet || (hit.line > 0 ? '' : '')
+    const text = hit.snippet || ''
     if (text && q) {
       const at = text.toLowerCase().indexOf(q.toLowerCase())
       if (at >= 0) {
@@ -3090,8 +3114,9 @@ function openSearch(): void {
   searchInputEl.focus()
 }
 
-function closeSearch(): void {
+function closeSearch(restoreFocus = false): void {
   searchModalEl.hidden = true
+  if (restoreFocus) focusEditorSurface()
 }
 
 searchInputEl.addEventListener('input', () => {
@@ -3120,12 +3145,12 @@ searchInputEl.addEventListener('keydown', (e) => {
     openSearchHit(searchActive, e.metaKey || e.ctrlKey)
   } else if (e.key === 'Escape') {
     e.preventDefault()
-    closeSearch()
+    closeSearch(true)
   }
 })
 
 searchModalEl.addEventListener('mousedown', (e) => {
-  if (e.target === searchModalEl) closeSearch()
+  if (e.target === searchModalEl) closeSearch(true)
 })
 
 window.addEventListener('keydown', (e) => {
@@ -3133,13 +3158,13 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault()
   if (e.shiftKey) {
     // ⌘⇧F — search the whole workspace
-    if (!searchModalEl.hidden) closeSearch()
+    if (!searchModalEl.hidden) closeSearch(true)
     else openSearch()
     return
   }
   // ⌘F — find in the current page
   if (findBarEl.hidden) openFind()
-  else closeFind()
+  else closeFind(true)
 })
 
 // ---------------------------------------------------------------------------
@@ -3293,6 +3318,8 @@ let bootSeq = 0
 // Set once the agent panel exists; lets workspace switching reset it without a
 // circular reference at module scope.
 let restartAgentPanel: (() => Promise<void>) | null = null
+/** The live agent panel. Switching workspaces points it at the new root. */
+let agentPanel: ReturnType<typeof setupAgentPanel> | null = null
 
 async function initWorkspace(): Promise<void> {
   const seq = ++bootSeq
@@ -3303,6 +3330,10 @@ async function initWorkspace(): Promise<void> {
     // A different workspace may reuse the same relative paths — start clean.
     pageCache.clear()
     cacheWorkspacePath = base
+    // The agent panel holds its own copy of the workspace root (session
+    // reopen, agentSessionRoot); it must follow us or it keeps pointing at the
+    // folder we just left.
+    void agentPanel?.setWorkspace(base)
   }
   if (!base) {
     welcomeEl.hidden = false
@@ -3685,6 +3716,7 @@ async function init(): Promise<void> {
       apiKey: ((await window.api.getSettings('agentApiKey')) as string) || ''
     })
   })
+  agentPanel = agentApi
 
   const sizeSelect = document.getElementById('size-select') as HTMLSelectElement
   for (const s of RENDER_SIZES) {

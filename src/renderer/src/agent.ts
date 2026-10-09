@@ -83,6 +83,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   restart: () => Promise<void>
   newChat: () => Promise<void>
   openRecent: (anchor: HTMLElement) => Promise<void>
+  setWorkspace: (path: string | null) => Promise<void>
 } {
   const messagesEl = document.getElementById('agent-messages') as HTMLElement
   const form = document.getElementById('agent-form') as HTMLFormElement
@@ -145,6 +146,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   let currentSessionFile: string | null = null
   /** Session whose messages the panel is showing. */
   let shownSessionFile: string | null = null
+  /** Workspace this panel belongs to. Switching workspaces rewrites it —
+   *  `opts.workspace` is captured once at boot and went stale on a switch,
+   *  which pointed session-reopen and agentSessionRoot at the old folder. */
+  let workspacePath: string | null = opts.workspace
 
   // The panel transcript and the pi session are separate state. They must never
   // drift: every start/resume goes through attachToShown(), and any mismatch is
@@ -610,7 +615,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   /** Remember this conversation so the next launch reopens it. */
   async function rememberSession(path: string | null): Promise<void> {
     await window.api.setSettings('agentSessionFile', path ?? '')
-    await window.api.setSettings('agentSessionRoot', path ? opts.workspace ?? '' : '')
+    await window.api.setSettings('agentSessionRoot', path ? workspacePath ?? '' : '')
   }
 
   function clearTranscript(): void {
@@ -1459,9 +1464,9 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   // ---- boot: reopen the conversation this workspace was last on ------------
   // Without this the panel started empty on every launch and the agent silently
   // began a new session, which is why yesterday's conversation looked lost.
-  void (async () => {
+  async function reopenRemembered(): Promise<void> {
     try {
-      const root = opts.workspace
+      const root = workspacePath
       const remembered = ((await window.api.getSettings('agentSessionFile')) as string) || ''
       const rememberedRoot = ((await window.api.getSettings('agentSessionRoot')) as string) || ''
       if (!root || !remembered || rememberedRoot !== root) return
@@ -1471,7 +1476,8 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     } catch (err) {
       logLine('warn', 'agent panel: could not reopen the last conversation: ' + String((err as Error).message ?? err))
     }
-  })()
+  }
+  void reopenRemembered()
 
   return {
     restart: async () => {
@@ -1490,6 +1496,23 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       }
     },
     newChat,
-    openRecent
+    openRecent,
+    /**
+     * Follow the app to another workspace. The transcript on screen belongs to
+     * the old one, so detach, clear, and reopen whatever this workspace was
+     * last on — otherwise the header keeps advertising a conversation that the
+     * agent (now rooted in the new folder) can no longer reach.
+     */
+    setWorkspace: async (path: string | null) => {
+      if (path === workspacePath) return
+      workspacePath = path
+      await window.api.agentStop()
+      agentReady = false
+      currentSessionFile = null
+      shownSessionFile = null
+      clearTranscript()
+      updateSessionNotice()
+      await reopenRemembered()
+    }
   }
 }

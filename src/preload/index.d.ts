@@ -2,7 +2,7 @@ export interface WorkspaceChild {
   name: string
   path: string
   relPath: string
-  kind: 'page' | 'folder' | 'pdf' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
   title?: string
   icon?: string
   children?: WorkspaceChild[]

@@ -128,8 +128,16 @@ const api = {
     ipcRenderer.on('agent:event', listener)
     return () => ipcRenderer.removeListener('agent:event', listener)
   },
-  onAgentStarted: (callback: (payload: { model: string }) => void): (() => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, payload: { model: string }): void => callback(payload)
+  onAgentStarted: (
+    callback: (payload: { model: string; contextWindow?: number | null }) => void
+  ): (() => void) => {
+    // Main sends { model, contextWindow, sessionFile }; the panel reads the
+    // first two, so the listener type must carry them (it used to be model-only,
+    // which silently promised less than the wire format).
+    const listener = (
+      _e: Electron.IpcRendererEvent,
+      payload: { model: string; contextWindow?: number | null }
+    ): void => callback(payload)
     ipcRenderer.on('agent:started', listener)
     return () => ipcRenderer.removeListener('agent:started', listener)
   },

@@ -3259,7 +3259,7 @@ function convertDollarMathInDom(root: HTMLElement): boolean {
 }
 
 /** file:// URL for a local path, tolerating spaces and existing %-escapes. */
-function localFileUrl(path: string): string {
+export function localFileUrl(path: string): string {
   let decoded = path
   try {
     decoded = decodeURIComponent(path)
