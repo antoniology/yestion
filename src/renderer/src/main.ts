@@ -53,18 +53,103 @@ const imageStageEl = document.getElementById('image-stage') as HTMLElement
 // ---- state ----
 let currentPage: { relPath: string; absolutePath: string; title: string; icon: string; body: string; dirRel: string } | null = null
 let sourceMode = false
-let dirty = false
+
+// ---- save state (queued, per page) ----
+// Editing bumps a revision for the page; a save job is an immutable snapshot of
+// (body, title, icon, rev). Jobs drain serially. A page is "pending" while its
+// latest edit revision has not been written yet, so the status line can never
+// claim "Saved" while newer keystrokes are still unwritten. The previous
+// implementation flipped a single `dirty = false` after each write, which
+// silently dropped any keystrokes typed while that write was in flight.
+interface SaveJob {
+  relPath: string
+  title: string
+  icon: string
+  body: string
+  rev: number
+}
+const saveQueue: SaveJob[] = []
+let saveInFlight = false
+let revCounter = 0
+let quiesceWaiters: Array<() => void> = []
+const editRev = new Map<string, number>()
+const savedRev = new Map<string, number>()
 // Echo suppression: our own save comes back through the file watcher ~0.5s
-// later. Reloading that identical content re-creates the editor state and
-// dumps the caret at the end of the document — so remember what we wrote.
-let lastSavedBody: string | null = null
+// later. Reloading that identical content re-creates the editor state and dumps
+// the caret at the end of the document — so remember the bytes we persisted,
+// per page.
+const lastPersistedBody = new Map<string, string>()
 
 // Save: debounce + flush on blur/hidden.
 let saveTimer: number | null = null
-let saveInFlight = false
-let saveVersion = 0
-let saveRetry = false
 const SAVE_DEBOUNCE_MS = 1200
+
+function nextRev(): number {
+  return ++revCounter
+}
+function isPending(rel: string): boolean {
+  return (editRev.get(rel) ?? 0) > (savedRev.get(rel) ?? 0)
+}
+function resolveQuiesce(): void {
+  if (saveInFlight || saveQueue.length > 0) return
+  const waiters = quiesceWaiters
+  quiesceWaiters = []
+  for (const w of waiters) w()
+}
+/** Resolves once every queued write has settled (written or re-queued). */
+function whenSaveQuiescent(): Promise<void> {
+  if (!saveInFlight && saveQueue.length === 0) return Promise.resolve()
+  return new Promise((resolve) => quiesceWaiters.push(resolve))
+}
+/** Queue (or merge) a snapshot for its page; the newest revision per page wins. */
+function enqueueSave(job: SaveJob): void {
+  const i = saveQueue.findIndex((j) => j.relPath === job.relPath)
+  if (i >= 0) {
+    if (job.rev >= saveQueue[i].rev) saveQueue[i] = job
+  } else {
+    saveQueue.push(job)
+  }
+  void drainSaveQueue()
+}
+async function drainSaveQueue(): Promise<void> {
+  if (saveInFlight) return
+  const job = saveQueue.shift()
+  if (!job) {
+    resolveQuiesce()
+    return
+  }
+  saveInFlight = true
+  try {
+    const ok = await window.api.wsSave({
+      relPath: job.relPath,
+      title: job.title,
+      icon: job.icon,
+      body: job.body
+    })
+    if (!ok) throw new Error('save rejected')
+    savedRev.set(job.relPath, job.rev)
+    lastPersistedBody.set(job.relPath, job.body)
+    if (currentPage?.relPath === job.relPath) {
+      if (!isPending(job.relPath)) {
+        setSaveStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+      }
+      // Keep sidebar labels in sync with title/icon edits. (Structural scans are
+      // cheap once the tree-revision check is in place.)
+      queueTreeRefresh()
+    }
+  } catch (err) {
+    console.error('[yestion] save failed:', err)
+    if (currentPage?.relPath === job.relPath) {
+      setSaveStatus('Save failed — retrying')
+    }
+    // Never drop the write: re-queue after a backoff (merges with newer edits).
+    window.setTimeout(() => enqueueSave(job), 5000)
+    saveInFlight = false
+    return
+  }
+  saveInFlight = false
+  void drainSaveQueue()
+}
 
 function setSaveStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): void {
   saveStatusEl.textContent = text
@@ -74,76 +159,38 @@ function setSaveStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): v
   if (text) saveStatusEl.title = new Date().toLocaleTimeString() + ' — ' + text
 }
 
-async function persistNow(): Promise<void> {
-  if (!currentPage || !dirty) return
-  if (saveInFlight) {
-    saveRetry = true
-    return
-  }
-  saveInFlight = true
-  const version = saveVersion
-  let snapshot: { relPath: string; title: string; icon: string; body: string }
-  try {
-    snapshot = {
-      relPath: currentPage.relPath,
-      body: getActiveBody(),
-      title: pageTitleEl.value.trim() || currentPage.title,
-      icon: currentPage.icon
-    }
-  } catch (err) {
-    saveInFlight = false
-    // Log the full error: the status line only has room for the message, and
-    // serializer failures ("str.replace is not a function") need the stack.
-    console.error('[yestion] save failed while serializing:', err)
-    setSaveStatus('Save failed: ' + String((err as Error).message ?? err))
-    return
-  }
-  try {
-    const ok = await window.api.wsSave({
-      relPath: currentPage.relPath,
-      title: snapshot.title,
-      icon: snapshot.icon,
-      body: snapshot.body
-    })
-    if (ok) {
-      dirty = false
-      lastSavedBody = snapshot.body
-      setSaveStatus('Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-      window.setTimeout(() => void refreshTree(), 80)
-    } else {
-      setSaveStatus('Save failed')
-    }
-  } catch (err) {
-    console.error('[yestion] save failed:', err)
-    setSaveStatus('Save failed: ' + String((err as Error).message ?? err))
-  } finally {
-    saveInFlight = false
-    // Content changed while the write was in flight (typing, icon, title):
-    // coalesce into one follow-up save.
-    if (version !== saveVersion || saveRetry) {
-      saveRetry = false
-      window.setTimeout(() => void persistNow(), 250)
-    }
-  }
+/** Snapshot the current page and queue it. No-op unless there are unwritten edits. */
+function persistNow(): void {
+  if (!currentPage) return
+  const rel = currentPage.relPath
+  if (!isPending(rel)) return
+  enqueueSave({
+    relPath: rel,
+    title: pageTitleEl.value.trim() || currentPage.title,
+    icon: currentPage.icon,
+    body: getActiveBody(),
+    rev: editRev.get(rel) ?? nextRev()
+  })
 }
 
-function flushSave(): void {
-  if (!dirty) return
+/** Queue pending edits now; resolves once the queue drains (fire-and-forget is fine). */
+function flushSave(): Promise<void> {
   if (saveTimer !== null) {
     window.clearTimeout(saveTimer)
     saveTimer = null
   }
-  void persistNow()
+  persistNow()
+  return whenSaveQuiescent()
 }
 
 function scheduleSave(): void {
-  dirty = true
-  saveVersion += 1
-  setSaveStatus('Unsaved…')
+  if (!currentPage) return
+  editRev.set(currentPage.relPath, nextRev())
+  setSaveStatus('Unsaved…', 'pending')
   if (saveTimer !== null) window.clearTimeout(saveTimer)
   saveTimer = window.setTimeout(() => {
     saveTimer = null
-    void persistNow()
+    persistNow()
   }, SAVE_DEBOUNCE_MS)
 }
 
@@ -266,7 +313,7 @@ window.api.onWsExternalChange((rel) => {
     if (!currentPage) return
     if (rel !== currentPage.relPath) return
     // Preserve the user's own unsaved typing; otherwise reload from disk.
-    if (dirty) {
+    if (isPending(currentPage.relPath)) {
       setSaveStatus('File changed on disk — save to overwrite')
       return
     }
@@ -276,7 +323,7 @@ window.api.onWsExternalChange((rel) => {
     // external edit. When the body is unchanged (a rename, an icon tweak, or a
     // write with identical bytes) just sync the metadata — re-setting identical
     // content would push the caret to the end of the document.
-    if (fresh.body === lastSavedBody) {
+    if (fresh.body === lastPersistedBody.get(currentPage.relPath)) {
       currentPage = { ...fresh, dirRel: dirOf(fresh.relPath) }
       pageIconEl.textContent = fresh.icon
       pageIconEl.classList.toggle('no-icon', !fresh.icon)
@@ -316,19 +363,17 @@ function dirOf(relPath: string): string {
 }
 
 async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Promise<void> {
-  // Flush pending edits BEFORE switching. Otherwise a chip/typing queued for
-  // the debounced save is dropped when we navigate away: dirty goes false
-  // (no save) and the timer later sees "not dirty" and never saves.
-  if (dirty && saveTimer !== null) {
-    window.clearTimeout(saveTimer)
-    saveTimer = null
-    await persistNow()
-  }
+  // Queue the current page's pending edits BEFORE switching. The snapshot is
+  // captured synchronously here, so navigation never waits on the disk write
+  // and can't drop a debounced edit.
+  flushSave()
   const page = await window.api.wsRead(relPath)
   if (!page) return
   recordNav({ rel: page.relPath, kind: 'page', title: page.title })
   currentPage = { ...page, dirRel: dirOf(relPath) }
-  dirty = false
+  // A freshly loaded page has no unwritten edits.
+  editRev.delete(page.relPath)
+  savedRev.delete(page.relPath)
   setSaveStatus('')
   releasePdfViewer()
   pdfPaneEl.hidden = true
@@ -346,7 +391,7 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   ;(document.getElementById('crumb-bar') as HTMLElement).hidden = false
   if (!findBarEl.hidden) closeFind()
   schedulePrintPreview(200)
-  lastSavedBody = page.body
+  lastPersistedBody.set(page.relPath, page.body)
   scheduleOutline(120)
   renderBreadcrumbs()
   toggleSourceBtn.textContent = 'Split'
@@ -950,11 +995,7 @@ function releasePdfViewer(): void {
 async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
   recordNav({ rel: pathOrRel, kind: 'pdf', title: pathOrRel })
   if (fileDirty) await flushTextFile()
-  if (dirty && saveTimer !== null) {
-    window.clearTimeout(saveTimer)
-    saveTimer = null
-    await persistNow()
-  }
+  flushSave()
   const info = await window.api.wsGet()
   const abs = pathOrRel.startsWith('/')
     ? pathOrRel
@@ -1040,11 +1081,7 @@ function fitImage(): void {
 async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promise<void> {
   recordNav({ rel: pathOrRel, kind: 'image', title: pathOrRel })
   if (fileDirty) await flushTextFile()
-  if (dirty && saveTimer !== null) {
-    window.clearTimeout(saveTimer)
-    saveTimer = null
-    await persistNow()
-  }
+  flushSave()
   const info = await window.api.wsGet()
   const abs = pathOrRel.startsWith('/')
     ? pathOrRel
@@ -2166,6 +2203,7 @@ let splitLoading = false
 let splitDirty = false
 let splitSaveTimer: number | null = null
 let splitSaving = false
+let splitSaveQueued = false
 
 const splitRightEl = document.getElementById('split-right') as HTMLElement
 const splitBodyEl = document.getElementById('split-body') as HTMLElement
@@ -2226,8 +2264,15 @@ function scheduleSplitSave(): void {
 }
 
 async function saveSplitNow(): Promise<void> {
-  if (!splitRel || splitKind !== 'page' || !splitEditor || splitSaving) return
+  if (!splitRel || splitKind !== 'page' || !splitEditor) return
+  // A write is already running: remember that another is owed and let the
+  // in-flight one trigger it, instead of dropping this one.
+  if (splitSaving) {
+    splitSaveQueued = true
+    return
+  }
   splitSaving = true
+  let retry = false
   try {
     const body = splitEditor.getMarkdown()
     const ok = await window.api.wsSave({
@@ -2242,13 +2287,25 @@ async function saveSplitNow(): Promise<void> {
         'Saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       )
     } else {
-      setSplitStatus('Save failed', 'error')
+      retry = true
+      setSplitStatus('Save failed — retrying', 'error')
     }
   } catch (err) {
     console.error('[yestion] split save failed:', err)
-    setSplitStatus('Save failed', 'error')
+    retry = true
+    setSplitStatus('Save failed — retrying', 'error')
   } finally {
     splitSaving = false
+  }
+  if (retry) {
+    window.setTimeout(() => void saveSplitNow(), 5000)
+    return
+  }
+  // Edits that arrived during the write, or a save deferred behind it, coalesce
+  // into one follow-up.
+  if (splitSaveQueued || splitDirty) {
+    splitSaveQueued = false
+    void saveSplitNow()
   }
 }
 
