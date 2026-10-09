@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 import { promises as fs } from 'node:fs'
 import { basename, extname, join } from 'node:path'
+import { parsePageFile } from './frontmatter'
 
 export interface TreeNode {
   name: string
@@ -40,23 +41,15 @@ function fileIcon(ext: string): string {
   return '📄'
 }
 
-/** Front matter (title/icon) + body, without importing the workspace module. */
+/**
+ * Front matter (title/icon) + body. Delegates to the shared parser: this file
+ * used to carry its own near-copy, and the two disagreed on CRLF files and on
+ * quoted values, so the link tree and the file tree could show different
+ * titles for the same page.
+ */
 export function parsePage(text: string, fallbackTitle: string): { title: string; icon: string; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
-  if (!m) return { title: fallbackTitle, icon: '', body: text }
-  let title = fallbackTitle
-  let icon = ''
-  for (const line of m[1].split('\n')) {
-    const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
-    if (!kv) continue
-    let v = kv[2].trim()
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-      v = v.slice(1, -1)
-    }
-    if (kv[1] === 'title') title = v || title
-    else if (kv[1] === 'icon') icon = v
-  }
-  return { title, icon, body: text.slice(m[0].length) }
+  const { title, icon, body } = parsePageFile(text, fallbackTitle)
+  return { title, icon, body }
 }
 
 /**

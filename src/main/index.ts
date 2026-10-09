@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, Menu, clipboard, nativeTheme } from 'electron'
 import { basename, join, dirname } from 'node:path'
 import { writeFile as fsp, readFile as fsReadFile, access as fsAccess, appendFile } from 'node:fs/promises'
-import { watch as fsWatch, readFileSync, appendFileSync } from 'node:fs'
+import { watch as fsWatch, readFileSync } from 'node:fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { buildAppMenu } from './menu'
 import { buildLinkTree, organizeAfterSave } from './linktree'
@@ -252,7 +252,9 @@ const watchWorkspace = (root: string): void => {
       }, 350)
     })
   } catch (err) {
-    try { appendFileSync('/tmp/yestion-watch.log', `watch failed: ${String(err)}\n`) } catch { /* ignore */ }
+    // Was a hardcoded /tmp file nothing ever read; the app log is where the
+    // user (and support) actually look.
+    void logLine(`workspace watcher failed to start: ${String(err)}`, 'warn')
   }
 }
 
@@ -589,7 +591,15 @@ function registerWorkspaceHandlers(): void {
       const session = await openVaultSession(payload.path, payload.password)
       settingsStore.set('workspace', payload.path)
       watchWorkspace(session.workDir)
-      return { ok: true, name: session.name }
+      // Silently skipping a file the user can't see is how vault data goes
+      // "missing" with no explanation. Say which ones, and that they are safe.
+      const warning =
+        session.unreadable.length > 0
+          ? `${session.unreadable.length} file${session.unreadable.length === 1 ? '' : 's'} could not be unlocked and ` +
+            `left untouched: ${session.unreadable.slice(0, 5).join(', ')}` +
+            (session.unreadable.length > 5 ? `, +${session.unreadable.length - 5} more` : '')
+          : undefined
+      return { ok: true, name: session.name, warning }
     } catch (err) {
       const code = err instanceof VaultError ? err.code : 'corrupt'
       return { ok: false, code, message: err instanceof Error ? err.message : String(err) }

@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs'
 import { dirname, join, basename, relative, extname } from 'node:path'
+import { parsePageFile } from './frontmatter'
 // (dirname/relative re-exported at bottom for callers; absPath/file helpers below)
 
 export interface PageMeta {
@@ -108,34 +109,10 @@ function yamlValue(v: string): string {
   return needsQuote ? `"${escapeYaml(v)}"` : v
 }
 
-// Parse a markdown file: YAML front matter (title/icon) + body.
-export function parsePageFile(content: string, fallbackTitle: string): { title: string; icon: string; body: string; frontmatter: Record<string, string> } {
-  const m = /^---\n([\s\S]*?)\n---\n?/.exec(content)
-  if (!m) return { title: fallbackTitle, icon: '', body: content, frontmatter: {} }
-  const frontmatter: Record<string, string> = {}
-  for (const line of m[1].split('\n')) {
-    const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
-    if (!kv) continue
-    let v = kv[2].trim()
-    // Strip surrounding quotes and unescape. Repeat to heal values that were
-    // double-escaped by older buggy versions (title: "\"Real\"").
-    for (let i = 0; i < 3; i++) {
-      const q = v[0]
-      if ((q === '"' || q === "'") && v.length > 1 && v.endsWith(q)) {
-        v = v.slice(1, -1)
-        if (q === '"') v = v.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-      } else break
-    }
-    frontmatter[kv[1]] = v
-  }
-  const body = content.slice(m[0].length)
-  return {
-    title: frontmatter.title ?? fallbackTitle,
-    icon: (frontmatter.icon ?? '').trim(),
-    body,
-    frontmatter
-  }
-}
+// Parse a markdown file: YAML front matter (title/icon) + body. The parser
+// itself lives in frontmatter.ts — the side-by-side copy that used to be here
+// was LF-only, so a CRLF page lost its title and leaked `---` into the body.
+export { parsePageFile }
 
 export function serializePageFile(title: string, icon: string, body: string): string {
   let fm = `---\ntitle: ${yamlValue(title)}\n`

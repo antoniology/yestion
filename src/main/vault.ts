@@ -29,6 +29,7 @@ import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, randomBytes } from 'node:crypto'
 import { basename, dirname, join, relative, sep } from 'node:path'
+import { logLine } from './log'
 
 export const VAULT_DIR = '.yestion'
 export const VAULT_CONFIG = 'vault.json'
@@ -202,6 +203,8 @@ export interface VaultSession {
   snapshot: Map<string, string>
   sealed: Map<string, SealedValue>
   dirty: boolean
+  /** Entries that could not be decrypted on unlock (see openVaultSession). */
+  unreadable: string[]
 }
 
 let session: VaultSession | null = null
@@ -235,6 +238,7 @@ export async function openVaultSession(root: string, password: string): Promise<
   } catch {
     content = { v: 2, updated: '', files: {} }
   }
+  const unreadable: string[] = []
   for (const [rel, value] of Object.entries(content.files ?? {})) {
     try {
       const bytes = open(value, masterKey)
@@ -243,8 +247,19 @@ export async function openVaultSession(root: string, password: string): Promise<
       await fs.writeFile(target, bytes)
       sealed.set(rel, value)
     } catch {
-      // Skip undecryptable entries rather than failing the whole unlock.
+      // Can't decrypt this one. Keep its ciphertext in the map anyway: every
+      // flush rewrites the container from `sealed`, so dropping it here would
+      // delete the file from the vault the first time anything else was saved.
+      // It stays as-is, and the caller tells the user it was skipped.
+      sealed.set(rel, value)
+      unreadable.push(rel)
     }
+  }
+  if (unreadable.length > 0) {
+    void logLine(
+      `vault: ${unreadable.length} file(s) could not be decrypted and were left sealed: ${unreadable.join(', ')}`,
+      'error'
+    )
   }
 
   session = {
@@ -254,7 +269,8 @@ export async function openVaultSession(root: string, password: string): Promise<
     workDir,
     snapshot: new Map(),
     sealed,
-    dirty: false
+    dirty: false,
+    unreadable
   }
   await takeSnapshot(session)
   return session
@@ -276,12 +292,22 @@ async function listFiles(dir: string, base = dir, out: string[] = []): Promise<s
   return out
 }
 
+/**
+ * Identity of a working-copy file for change detection. ctime is part of it
+ * because it cannot be back-dated: an edit that preserves the size and restores
+ * the mtime (`rsync -t`, `git checkout`, most sync tools) would otherwise look
+ * unchanged and never get re-encrypted.
+ */
+function stampOf(st: { size: number; mtimeMs: number; ctimeMs: number }): string {
+  return `${st.size}:${st.mtimeMs}:${st.ctimeMs}`
+}
+
 async function takeSnapshot(s: VaultSession): Promise<void> {
   s.snapshot = new Map()
   for (const rel of await listFiles(s.workDir)) {
     try {
       const st = await fs.stat(join(s.workDir, rel))
-      s.snapshot.set(rel, `${st.size}:${st.mtimeMs}`)
+      s.snapshot.set(rel, stampOf(st))
     } catch {
       /* vanished */
     }
@@ -309,7 +335,7 @@ export async function flushVault(): Promise<void> {
       } catch {
         continue
       }
-      const stamp = `${st.size}:${st.mtimeMs}`
+      const stamp = stampOf(st)
       if (s.snapshot.get(rel) === stamp && s.sealed.has(rel)) continue
       try {
         const bytes = await fs.readFile(abs)
@@ -321,6 +347,9 @@ export async function flushVault(): Promise<void> {
       }
     }
     for (const rel of [...s.sealed.keys()]) {
+      // Entries we couldn't decrypt have no working-copy file by design; they
+      // are not deletions, and sweeping them here would lose the data.
+      if (s.unreadable.includes(rel)) continue
       if (!seen.has(rel)) {
         s.sealed.delete(rel)
         s.snapshot.delete(rel)

@@ -207,7 +207,17 @@ export async function setProviderKey(providerId: string, key: string): Promise<v
   await writeJson(keysPath(), keys, true)
 }
 
+/**
+ * Key for the in-flight draft probe. Held in memory only: this used to be
+ * written into the real `keys.json` as a 'draft' provider and restored
+ * afterwards, so a crash (or two probes at once) could strand the entry in the
+ * user's key file — or lose the file outright.
+ */
+let draftKey: string | null = null
+
 export async function getProviderKey(providerId: string): Promise<string | undefined> {
+  // Settings' Test button probes a key that has not been saved yet.
+  if (providerId === 'draft') return draftKey ?? undefined
   const keys = await readJson<Record<string, string>>(keysPath(), {})
   const stored = keys[providerId]
   if (!stored) return undefined
@@ -412,19 +422,14 @@ export async function probeDraft(draft: {
     api: draft.api,
     models: []
   }
-  const original = await readJson<Record<string, string>>(keysPath(), {})
-  const store = { ...original }
-  store['draft'] = safeStorage.isEncryptionAvailable()
-    ? 'enc:' + safeStorage.encryptString(draft.key).toString('base64')
-    : 'raw:' + Buffer.from(draft.key, 'utf-8').toString('base64')
-  await writeJson(keysPath(), store, true)
-  const patched = providers
+  const original = providers
   providers = [{ ...provider, models: [{ id: draft.modelId, name: draft.modelId, contextWindow: 0, maxTokens: 0, reasoning: false, input: { text: true, image: false, audio: false, video: false } }] }]
+  draftKey = draft.key || null
   try {
     return await testProvider('draft')
   } finally {
-    providers = patched
-    await writeJson(keysPath(), original, true)
+    providers = original
+    draftKey = null
   }
 }
 

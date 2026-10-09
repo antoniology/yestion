@@ -25,7 +25,7 @@ const api = {
   wsAddToList: (payload: { path: string; name?: string }) => ipcRenderer.invoke('ws:addToList', payload),
   wsForget: (path: string) => ipcRenderer.invoke('ws:forget', path),
   wsSwitch: (path: string): Promise<{ ok: boolean; private?: boolean; message?: string }> => ipcRenderer.invoke('ws:switch', path),
-  wsUnlock: (payload: { path: string; password: string }): Promise<{ ok: boolean; name?: string; code?: string; message?: string }> =>
+  wsUnlock: (payload: { path: string; password: string }): Promise<{ ok: boolean; name?: string; code?: string; message?: string; warning?: string }> =>
     ipcRenderer.invoke('ws:unlock', payload),
   wsLock: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('ws:lock'),
   wsChangePassword: (payload: { current: string; next: string }): Promise<{ ok: boolean; message?: string }> =>

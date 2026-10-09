@@ -2161,6 +2161,9 @@ function openPasswordGate(opts: PasswordGateOpts): void {
     }
     modal.hidden = true
     await initWorkspace()
+    // Files that wouldn't decrypt are skipped, not deleted — say so, or they
+    // just look like the vault ate them.
+    if (res.warning) window.alert(res.warning)
   }
 
   submit.onclick = () => void submitFn()

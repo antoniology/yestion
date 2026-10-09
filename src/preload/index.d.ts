@@ -31,7 +31,7 @@ export interface Api {
   wsAddToList: (payload: { path: string; name?: string }) => Promise<unknown>
   wsForget: (path: string) => Promise<unknown>
   wsSwitch: (path: string) => Promise<{ ok: boolean; private?: boolean; message?: string }>
-  wsUnlock: (payload: { path: string; password: string }) => Promise<{ ok: boolean; name?: string; code?: string; message?: string }>
+  wsUnlock: (payload: { path: string; password: string }) => Promise<{ ok: boolean; name?: string; code?: string; message?: string; warning?: string }>
   wsLock: () => Promise<{ ok: boolean }>
   wsChangePassword: (payload: { current: string; next: string }) => Promise<{ ok: boolean; message?: string }>
   wsGet: () => Promise<{

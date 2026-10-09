@@ -784,8 +784,20 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     // Highlight the session the agent is actually attached to: marking the
     // rendered one made the highlighted row look clickable-but-dead.
     currentSessionFile = (await window.api.agentSessionCurrent()) ?? currentSessionFile
-    const sessions = await window.api.agentSessions()
     list.innerHTML = ''
+    let sessions: Awaited<ReturnType<typeof window.api.agentSessions>>
+    try {
+      sessions = await window.api.agentSessions()
+    } catch (err) {
+      // Without this the popup sat on "Loading…" forever and the rejection
+      // vanished into the console.
+      const failed = document.createElement('div')
+      failed.className = 'agent-recent-empty'
+      failed.textContent = 'Could not list conversations: ' + String((err as Error)?.message ?? err)
+      list.appendChild(failed)
+      logLine('warn', 'agent panel: listing conversations failed: ' + String((err as Error)?.message ?? err))
+      return
+    }
     if (!Array.isArray(sessions) || sessions.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'agent-recent-empty'

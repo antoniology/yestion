@@ -131,7 +131,15 @@ export function buildAppMenu(_onNewWindow: () => void, onCommand: (cmd: string) 
     {
       role: 'help',
       submenu: [
-        { label: 'Yestion on GitHub', click: () => void shell.openExternal('https://github.com/') }
+        { label: `Yestion ${app.getVersion()}`, enabled: false },
+        { type: 'separator' },
+        // Was a dead "Yestion on GitHub" item pointing at https://github.com/.
+        // Nobody has a repo URL for this build, so the Help menu does something
+        // real instead: open the folder holding settings and yestion.log.
+        {
+          label: 'Open App Data Folder',
+          click: () => void shell.openPath(app.getPath('userData'))
+        }
       ]
     }
   ]
