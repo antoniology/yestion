@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, Menu, clipboard } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, Menu, clipboard, nativeTheme } from 'electron'
 import { basename, join, dirname } from 'node:path'
 import { writeFile as fsp, readFile as fsReadFile, access as fsAccess, appendFile } from 'node:fs/promises'
 import { watch as fsWatch, readFileSync, appendFileSync } from 'node:fs'
@@ -17,6 +17,7 @@ import {
   type ProviderConfig
 } from './providers'
 import { settingsStore, type WorkspaceEntry } from './store'
+import { themeBackground, themeKind } from './theme-meta'
 import {
   closeVaultSession,
   createVault,
@@ -113,6 +114,13 @@ async function migrateWorkspaceList(): Promise<void> {
 }
 
 async function createWindow(): Promise<BrowserWindow> {
+  // The theme below (and every setting the renderer reads at boot) must come
+  // from the file, not the defaults.
+  await settingsStore.ready()
+  // Paint the window in the user's own theme background from the very first
+  // frame — a dark-theme user used to get a white flash on every launch.
+  const theme = settingsStore.get('theme') as string | undefined
+  nativeTheme.themeSource = themeKind(theme)
   const win = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -120,7 +128,7 @@ async function createWindow(): Promise<BrowserWindow> {
     minHeight: 600,
     show: false,
     title: 'Yestion',
-    backgroundColor: '#ffffff',
+    backgroundColor: themeBackground(theme),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -1016,8 +1024,12 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('settings:get', (_e, key: string) => settingsStore.get(key as never))
+  ipcMain.handle('settings:getAll', () => settingsStore.getAll())
   ipcMain.handle('settings:set', (_e, key: string, value: unknown) => {
     settingsStore.set(key as never, value as never)
+  })
+  ipcMain.handle('settings:setMany', (_e, patch: Record<string, unknown>) => {
+    settingsStore.setMany(patch as never)
   })
 
   void createWindow().then((w) => {

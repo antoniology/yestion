@@ -578,8 +578,9 @@ function tabIconFor(tab: TabInfo): string {
 }
 
 function persistTabs(): void {
-  void window.api.setSettings('openTabs', tabs)
-  void window.api.setSettings('activeTab', activeTab)
+  // Both keys describe one thing (the tab strip) — write them together so a
+  // crash can't leave activeTab pointing outside openTabs.
+  void window.api.setSettingsMany({ openTabs: tabs, activeTab })
 }
 
 /** Index of the tab a tab element currently represents (tab paths are unique). */
@@ -1453,14 +1454,8 @@ function cycleTheme(): void {
   setTheme(nextTheme(themeId).id)
 }
 
-// Boot: restore the saved theme (was never applied on startup before).
-void (async () => {
-  const saved = ((await window.api.getSettings('theme')) as string | undefined) ?? 'light'
-  themeId = saved
-  const theme = applyTheme(saved)
-  codeEditor.setTheme(theme.kind)
-  syncThemeSelect()
-})()
+// The saved theme is applied by init() (it reads the whole settings object in
+// one round trip) — this used to run a second, independent settings read.
 let currentPreviewFontId = 'default'
 
 function applyPreviewFont(id: string): void {
@@ -2964,10 +2959,6 @@ window.addEventListener('resize', () => {
   if (!findBarEl.hidden) placeFindBar()
 })
 
-window.addEventListener('resize', () => {
-  if (!findBarEl.hidden) placeFindBar()
-})
-
 document.getElementById('find-next')!.addEventListener('click', () => stepFind(1))
 document.getElementById('find-prev')!.addEventListener('click', () => stepFind(-1))
 document.getElementById('find-close')!.addEventListener('click', () => closeFind())
@@ -3425,19 +3416,25 @@ function attachResizer(handleId: string, targetId: string, settingKey: 'sidebarW
 
 // ---- boot ----
 async function init(): Promise<void> {
-  const res = await window.api.wsGet()
+  // One round trip for the workspace info and one for all settings — boot used
+  // to await ~20 separate settings:get calls, one after another.
+  const [res, settings] = await Promise.all([window.api.wsGet(), window.api.getSettingsAll()])
+  const setting = <T,>(key: string, fallback: T): T => {
+    const v = settings[key]
+    return v === undefined || v === null ? fallback : (v as T)
+  }
   const savedTheme = res.theme ?? 'light'
   setTheme(savedTheme)
-  applyPreviewFont(((await window.api.getSettings('previewFont')) as string | undefined) ?? 'default')
-  applyRenderSize(((await window.api.getSettings('renderFontSize')) as string | undefined) ?? 'm')
+  applyPreviewFont(res.previewFont ?? 'default')
+  applyRenderSize(setting('renderFontSize', 'm'))
   const previewBtn = document.getElementById('page-mode-btn')
   if (previewBtn) previewBtn.textContent = 'Preview'
-  showPageTitle = ((await window.api.getSettings('showPageTitle')) as boolean | undefined) ?? true
-  showPageIcon = ((await window.api.getSettings('showPageIcon')) as boolean | undefined) ?? true
+  showPageTitle = setting('showPageTitle', true)
+  showPageIcon = setting('showPageIcon', true)
   applyPageDisplay()
-  exportMargin = ((await window.api.getSettings('exportMargin')) as ExportMargin | undefined) ?? 'medium'
-  exportIncludeTitle = ((await window.api.getSettings('exportTitle')) as boolean | undefined) ?? true
-  exportIncludeIcon = ((await window.api.getSettings('exportIcon')) as boolean | undefined) ?? true
+  exportMargin = setting('exportMargin', 'medium' as ExportMargin)
+  exportIncludeTitle = setting('exportTitle', true)
+  exportIncludeIcon = setting('exportIcon', true)
   applyExportMenuState()
 
   const wsModal = document.getElementById('workspace-modal') as HTMLElement
@@ -3695,7 +3692,7 @@ async function init(): Promise<void> {
     opt.textContent = s.label
     sizeSelect.appendChild(opt)
   }
-  sizeSelect.value = ((await window.api.getSettings('renderFontSize')) as string | undefined) ?? 'm'
+  sizeSelect.value = setting('renderFontSize', 'm')
   applyRenderSize(sizeSelect.value)
   sizeSelect.addEventListener('change', () => {
     applyRenderSize(sizeSelect.value)
@@ -3704,7 +3701,7 @@ async function init(): Promise<void> {
   })
 
   const fontSelect = document.getElementById('font-select') as HTMLSelectElement
-  fillFontSelect(fontSelect, (await window.api.getSettings('previewFont')) as string | undefined)
+  fillFontSelect(fontSelect, res.previewFont)
   fontSelect.addEventListener('change', () => applyPreviewFont(fontSelect.value))
 
   const settingsApi = setupSettings({
@@ -3723,13 +3720,13 @@ async function init(): Promise<void> {
   })
   await onboarding.maybeShow()
   buildThemeSelect()
-  const savedSplitRatio = (await window.api.getSettings('splitRatio')) as number | undefined
+  const savedSplitRatio = settings['splitRatio'] as number | undefined
   if (typeof savedSplitRatio === 'number' && savedSplitRatio > 0.2 && savedSplitRatio < 0.8) {
     splitRatio = savedSplitRatio
   }
   applySplitRatio()
   watchOutline()
-  setSidebarOpen(((await window.api.getSettings('sidebarOpen')) as boolean | undefined) !== false, false)
+  setSidebarOpen(setting<boolean>('sidebarOpen', true) !== false, false)
   window.addEventListener('yestion:tree-changed', () => void refreshTree())
   // Actions coming back from the native right-click menu.
   window.api.onItemAction(({ action, relPath, kind }) => {
@@ -3755,14 +3752,14 @@ async function init(): Promise<void> {
     })()
   })
 
-  const sidebarW = (await window.api.getSettings('sidebarWidth')) as number | undefined
-  const agentW = (await window.api.getSettings('agentWidth')) as number | undefined
+  const sidebarW = settings['sidebarWidth'] as number | undefined
+  const agentW = settings['agentWidth'] as number | undefined
   if (typeof sidebarW === 'number') (document.getElementById('sidebar') as HTMLElement).style.flexBasis = sidebarW + 'px'
   if (typeof agentW === 'number') (document.getElementById('agent-panel') as HTMLElement).style.flexBasis = agentW + 'px'
   attachResizer('sidebar-resizer', 'sidebar', 'sidebarWidth', 160, 480)
   attachResizer('agent-resizer', 'agent-panel', 'agentWidth', 260, 640)
 
-  const agentOpen = (await window.api.getSettings('agentOpen')) as boolean | undefined
+  const agentOpen = setting<boolean>('agentOpen', false)
   ;(document.getElementById('agent-panel') as HTMLElement).hidden = agentOpen !== true
   ;(document.getElementById('agent-resizer') as HTMLElement).hidden = agentOpen !== true
   ;(document.getElementById('toggle-agent-btn') as HTMLElement).classList.toggle('active', agentOpen === true)

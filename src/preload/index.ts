@@ -140,7 +140,12 @@ const api = {
   },
 
   getSettings: <K extends string>(key: K): Promise<unknown> => ipcRenderer.invoke('settings:get', key),
+  /** Whole settings object in one round trip (boot reads ~20 keys). */
+  getSettingsAll: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('settings:getAll'),
   setSettings: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke('settings:set', key, value),
+  /** Several keys in one write (e.g. openTabs + activeTab). */
+  setSettingsMany: (patch: Record<string, unknown>): Promise<void> =>
+    ipcRenderer.invoke('settings:setMany', patch),
   onMenuAction: (callback: (action: string) => void): (() => void) => {
     const listener = (_e: Electron.IpcRendererEvent, action: string): void => callback(action)
     ipcRenderer.on('menu-action', listener)

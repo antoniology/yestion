@@ -139,7 +139,9 @@ export interface Api {
   onAgentStopped: (callback: () => void) => () => void
 
   getSettings: <K extends string>(key: K) => Promise<unknown>
+  getSettingsAll: () => Promise<Record<string, unknown>>
   setSettings: (key: string, value: unknown) => Promise<void>
+  setSettingsMany: (patch: Record<string, unknown>) => Promise<void>
   onMenuAction: (callback: (action: string) => void) => () => void
   onPageMoved: (
     fn: (moves: { from: string; to: string; fromDir?: string; toDir?: string }[]) => void

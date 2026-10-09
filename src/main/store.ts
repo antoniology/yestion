@@ -71,6 +71,8 @@ class SettingsStore {
   private cache: Settings = { ...DEFAULTS }
   private file: string
   private loaded: Promise<void>
+  /** Keys written before load() resolved — these must win over the file. */
+  private touched = new Set<keyof Settings>()
 
   constructor() {
     this.file = join(app.getPath('userData'), SETTINGS_FILE)
@@ -78,13 +80,28 @@ class SettingsStore {
   }
 
   private async load(): Promise<void> {
+    let parsed: Partial<Settings> = {}
     try {
-      const raw = await fs.readFile(this.file, 'utf-8')
-      const parsed = JSON.parse(raw)
-      this.cache = { ...DEFAULTS, ...parsed }
+      parsed = JSON.parse(await fs.readFile(this.file, 'utf-8')) as Partial<Settings>
     } catch {
-      this.cache = { ...DEFAULTS }
+      // First run, or an unreadable/corrupt file: keep the defaults.
     }
+    const merged: Settings = { ...DEFAULTS, ...parsed }
+    // A set() that ran while this load was in flight must not be clobbered by
+    // the file we just read (boot writes theme/tabs before the read resolves).
+    for (const key of this.touched) {
+      (merged as unknown as Record<string, unknown>)[key] = this.cache[key]
+    }
+    this.cache = merged
+  }
+
+  /** Resolves once the on-disk settings have been merged in. */
+  ready(): Promise<void> {
+    return this.loaded
+  }
+
+  getAll(): Settings {
+    return { ...this.cache }
   }
 
   get<K extends keyof Settings>(key: K): Settings[K] {
@@ -92,7 +109,16 @@ class SettingsStore {
   }
 
   set<K extends keyof Settings>(key: K, value: Settings[K]): void {
+    this.touched.add(key)
     this.cache[key] = value
+    void this.persist()
+  }
+
+  setMany(patch: Partial<Settings>): void {
+    for (const [key, value] of Object.entries(patch)) {
+      this.touched.add(key as keyof Settings)
+      ;(this.cache as unknown as Record<string, unknown>)[key] = value
+    }
     void this.persist()
   }
 
