@@ -1,4 +1,5 @@
 import { renderAgentMarkdown } from './agent-markdown'
+import { anchorFloat } from './floats'
 
 export interface AgentPanelOpts {
   getContext?: () => { title: string; relPath: string } | null
@@ -84,6 +85,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   newChat: () => Promise<void>
   openRecent: (anchor: HTMLElement) => Promise<void>
   setWorkspace: (path: string | null) => Promise<void>
+  dismissFloats: () => HTMLElement[]
 } {
   const messagesEl = document.getElementById('agent-messages') as HTMLElement
   const form = document.getElementById('agent-form') as HTMLFormElement
@@ -746,10 +748,16 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
 
   async function openRecent(anchor: HTMLElement): Promise<void> {
     const existing = document.getElementById('agent-recent-pop')
+    // Pressing the same button again closes the list instead of rebuilding it.
+    if (existing && existing.dataset.anchorId === anchor.id) {
+      existing.remove()
+      return
+    }
     existing?.remove()
     const pop = document.createElement('div')
     pop.id = 'agent-recent-pop'
     pop.className = 'agent-recent-pop'
+    pop.dataset.anchorId = anchor.id
     const head = document.createElement('div')
     head.className = 'agent-recent-head'
     head.textContent = 'Recent conversations'
@@ -769,17 +777,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     list.appendChild(loading)
     pop.append(head, newBtn, list)
     document.body.appendChild(pop)
+    anchorFloat(pop, anchor)
     const rect = anchor.getBoundingClientRect()
     pop.style.top = Math.round(rect.bottom + 6) + 'px'
     pop.style.right = Math.max(8, Math.round(window.innerWidth - rect.right)) + 'px'
-
-    const close = (e: MouseEvent): void => {
-      if (!pop.contains(e.target as Node)) {
-        pop.remove()
-        document.removeEventListener('mousedown', close)
-      }
-    }
-    window.setTimeout(() => document.addEventListener('mousedown', close), 0)
 
     // Highlight the session the agent is actually attached to: marking the
     // rendered one made the highlighted row look clickable-but-dead.
@@ -1525,6 +1526,24 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       clearTranscript()
       updateSessionNotice()
       await reopenRemembered()
+    },
+    /**
+     * Close the panel's own floating bits — the recent-conversations popover
+     * and the slash list. Without this they stayed on screen after the panel
+     * was hidden, and Escape reached neither.
+     */
+    dismissFloats: (): HTMLElement[] => {
+      const closed: HTMLElement[] = []
+      const pop = document.getElementById('agent-recent-pop')
+      if (pop) {
+        pop.remove()
+        closed.push(pop)
+      }
+      if (!slashMenu.hidden) {
+        hideSlash()
+        closed.push(slashMenu)
+      }
+      return closed
     }
   }
 }

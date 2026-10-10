@@ -1379,6 +1379,11 @@ interface PickerPage {
 
 type PickerRow = { kind: 'page'; page: PickerPage } | { kind: 'create'; name: string }
 
+/** The link/create picker is a full-screen overlay that lives only while it is
+ *  open. The handle lets the shared dismissal pass close it like any other
+ *  floating surface. */
+let pagePickerOverlay: HTMLElement | null = null
+
 function openPagePicker(
   editor: Editor,
   getPages: () => Promise<PickerPage[]>,
@@ -1388,6 +1393,11 @@ function openPagePicker(
 ): void {
   const overlay = document.createElement('div')
   overlay.className = 'page-picker'
+  pagePickerOverlay = overlay
+  const closePicker = (): void => {
+    overlay.remove()
+    if (pagePickerOverlay === overlay) pagePickerOverlay = null
+  }
 
   const head = document.createElement('div')
   head.className = 'page-picker-head'
@@ -1450,7 +1460,7 @@ function openPagePicker(
   const createAndInsert = (name: string): void => {
     void (async () => {
       const title = await createPage(name || 'Untitled')
-      overlay.remove()
+      closePicker()
       editor.chain().focus().insertContent({ type: 'pageLink', attrs: { name: title } }).run()
       afterInsert?.()
     })()
@@ -1463,7 +1473,7 @@ function openPagePicker(
       createAndInsert(row.name)
       return
     }
-    overlay.remove()
+    closePicker()
     editor.chain().focus().insertContent({ type: 'pageLink', attrs: { name: row.page.title } }).run()
     afterInsert?.()
   }
@@ -1571,7 +1581,7 @@ function openPagePicker(
     }
     if (e.key === 'Escape') {
       e.preventDefault()
-      overlay.remove()
+      closePicker()
       editor.commands.focus()
     }
   }
@@ -1580,7 +1590,7 @@ function openPagePicker(
   input.addEventListener('input', () => draw(true))
   overlay.addEventListener('mousedown', (e) => {
     if (e.target === overlay) {
-      overlay.remove()
+      closePicker()
       editor.commands.focus()
     }
   })
@@ -1711,13 +1721,15 @@ let highlightPopupEl: HTMLElement | null = null
 let highlightPopupOutside: ((e: MouseEvent) => void) | null = null
 let highlightPopupKey: ((e: KeyboardEvent) => void) | null = null
 
-function closeHighlightPopup(): void {
-  if (highlightPopupEl) highlightPopupEl.remove()
+function closeHighlightPopup(): HTMLElement | null {
+  const el = highlightPopupEl
+  if (el) el.remove()
   highlightPopupEl = null
   if (highlightPopupOutside) document.removeEventListener('mousedown', highlightPopupOutside)
   if (highlightPopupKey) document.removeEventListener('keydown', highlightPopupKey)
   highlightPopupOutside = null
   highlightPopupKey = null
+  return el
 }
 
 function openHighlightPopup(
@@ -1990,9 +2002,11 @@ function handleHighlightClick(view: EditorView, pos: number): boolean {
 
 const TABLE_PICKER_MAX = 8
 
-function closeTablePicker(): void {
-  document.querySelector('.table-size-picker')?.remove()
+function closeTablePicker(): HTMLElement | null {
+  const el = document.querySelector<HTMLElement>('.table-size-picker')
+  el?.remove()
   document.removeEventListener('mousedown', closeTablePickerOnOutside, true)
+  return el
 }
 function closeTablePickerOnOutside(e: MouseEvent): void {
   const el = document.querySelector('.table-size-picker')
@@ -2357,10 +2371,13 @@ function updateContextToolbars(editor: Editor): void {
   }
 }
 
-function hideContextToolbars(): void {
-  tableToolbarEl().hidden = true
-  columnToolbarEl().hidden = true
-  imageToolbarEl().hidden = true
+function hideContextToolbars(): HTMLElement[] {
+  const closed: HTMLElement[] = []
+  for (const el of [tableToolbarEl(), columnToolbarEl(), imageToolbarEl()]) {
+    if (!el.hidden) closed.push(el)
+    el.hidden = true
+  }
+  return closed
 }
 
 // ---------------------------------------------------------------------------
@@ -2503,6 +2520,43 @@ export interface RichEditor {
   setEditable: (editable: boolean) => void
 }
 
+/** Slash menus, one per live editor (the main pane and the split pane). */
+const slashMenus = new Set<{ el: HTMLElement; hide: () => void }>()
+
+/**
+ * Close everything the editors can leave floating: slash menus, the page
+ * picker, the highlight swatch bar, the table size picker, an equation editor
+ * and the contextual table/image toolbars. Returns the elements it closed.
+ */
+export function dismissEditorFloats(): HTMLElement[] {
+  const closed: HTMLElement[] = []
+  for (const menu of [...slashMenus]) {
+    if (!menu.el.isConnected) {
+      slashMenus.delete(menu)
+      continue
+    }
+    if (menu.el.hidden) continue
+    menu.hide()
+    closed.push(menu.el)
+  }
+  if (pagePickerOverlay) {
+    closed.push(pagePickerOverlay)
+    pagePickerOverlay.remove()
+    pagePickerOverlay = null
+  }
+  const swatches = closeHighlightPopup()
+  if (swatches) closed.push(swatches)
+  const picker = closeTablePicker()
+  if (picker) closed.push(picker)
+  if (mathPopup) {
+    const popup = mathPopup
+    closeMathPopup(true)
+    closed.push(popup)
+  }
+  closed.push(...hideContextToolbars())
+  return closed
+}
+
 export function createRichEditor(
   element: HTMLElement,
   initialMarkdown: string,
@@ -2531,6 +2585,10 @@ export function createRichEditor(
     menuEl.hidden = true
     menuEl.innerHTML = ''
   }
+
+  // Every live editor's slash menu, so the shared dismissal pass can close the
+  // one that's open without each editor keeping its own document listener.
+  slashMenus.add({ el: menuEl, hide: hideMenu })
 
   function commitSlash(cmd: SlashCommand | null): void {
     const t = trigger
@@ -2587,10 +2645,6 @@ export function createRichEditor(
     if (rect.right > window.innerWidth - 8) menuEl.style.left = window.innerWidth - rect.width - 8 + 'px'
     if (rect.bottom > window.innerHeight - 8) menuEl.style.top = coords.top - rect.height - 6 + 'px'
   }
-
-  document.addEventListener('mousedown', (e) => {
-    if (!menuEl.hidden && e.target instanceof Element && !menuEl.contains(e.target)) hideMenu()
-  })
 
   // --- editor ---
   const editor = new Editor({

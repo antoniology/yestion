@@ -1,4 +1,4 @@
-import { createRichEditor, localFileUrl, type RichEditor, type YestionPageOpts } from './wysiwyg'
+import { createRichEditor, dismissEditorFloats, localFileUrl, type RichEditor, type YestionPageOpts } from './wysiwyg'
 import { createEditor, type MarkdownEditor } from './editor'
 import { applyTheme, getTheme, nextTheme, THEMES } from './themes'
 import { fillFontSelect, fontById } from './fonts'
@@ -7,6 +7,7 @@ import { setupSidebar } from './sidebar'
 import { setupAgentPanel } from './agent'
 import { setupSettings } from './settings'
 import { EMOJI_LIST, EMOJI_GROUPS } from './emoji-data'
+import { anchorFloat, dismissFloats, installFloatDismissal, registerFloatCloser } from './floats'
 import './styles.css'
 import { createPdfViewer, type PdfViewerHandle } from './pdf-viewer'
 
@@ -460,7 +461,8 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   markActiveInTree(page.relPath)
   if (opts.tab !== false) upsertActiveTab({ relPath: page.relPath, kind: 'page', title: page.title, icon: page.icon })
   ;(document.getElementById('crumb-bar') as HTMLElement).hidden = false
-  if (!findBarEl.hidden) closeFind()
+  // Whatever was floating belonged to the page we just left.
+  dismissFloats()
   schedulePrintPreview(200)
   lastPersistedBody.set(page.relPath, page.body)
   scheduleOutline(120)
@@ -794,6 +796,8 @@ function scrollForTab(tab: TabInfo): number | undefined {
 
 async function loadTabContent(tab: TabInfo): Promise<void> {
   recordNav({ rel: tab.relPath, kind: tab.kind, title: tab.title })
+  // Menus and pickers from the tab we're leaving don't belong over this one.
+  dismissFloats()
   try {
     if (tab.kind === 'pdf') await openPdf(tab.relPath, { tab: false })
     else if (tab.kind === 'image') await openImage(tab.relPath, { tab: false })
@@ -928,7 +932,23 @@ async function restoreTabs(remembered?: { tabs: TabInfo[]; activeTab: number }):
   return true
 }
 
+let tabPickerEl: HTMLElement | null = null
+
+/** Close the new-tab page picker. Returns the element it closed, so the
+ *  shared dismissal pass (Escape, a click elsewhere, scrolling) can too. */
+function closeTabPicker(): HTMLElement | null {
+  const pop = tabPickerEl
+  if (!pop) return null
+  tabPickerEl = null
+  pop.remove()
+  return pop
+}
+
 async function newTab(): Promise<void> {
+  if (tabPickerEl) {
+    closeTabPicker()
+    return
+  }
   const pages = await window.api.wsAllPages()
   const pop = document.createElement('div')
   pop.className = 'tab-picker'
@@ -939,6 +959,8 @@ async function newTab(): Promise<void> {
   list.className = 'tab-picker-list'
   pop.append(input, list)
   document.body.appendChild(pop)
+  tabPickerEl = pop
+  anchorFloat(pop, tabAddEl)
   const rect = tabBarEl.getBoundingClientRect()
   pop.style.left = Math.round(rect.left + 8) + 'px'
   pop.style.top = Math.round(rect.bottom + 4) + 'px'
@@ -952,7 +974,7 @@ async function newTab(): Promise<void> {
       row.className = 'tab-picker-item'
       row.textContent = (p.icon ? p.icon + '  ' : '') + p.title
       row.addEventListener('click', () => {
-        pop.remove()
+        closeTabPicker()
         void openRel(p.relPath, 'page', true)
       })
       list.appendChild(row)
@@ -967,7 +989,7 @@ async function newTab(): Promise<void> {
   input.addEventListener('input', draw)
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      pop.remove()
+      closeTabPicker()
       return
     }
     if (e.key === 'Enter') {
@@ -975,13 +997,6 @@ async function newTab(): Promise<void> {
       first?.click()
     }
   })
-  const outside = (e: MouseEvent): void => {
-    if (!pop.contains(e.target as Node)) {
-      pop.remove()
-      document.removeEventListener('mousedown', outside)
-    }
-  }
-  window.setTimeout(() => document.addEventListener('mousedown', outside), 0)
   draw()
   input.focus()
 }
@@ -1504,6 +1519,15 @@ const emojiPicker = document.getElementById('emoji-picker') as HTMLElement
 let emojiGrid: HTMLElement | null = null
 let emojiInput: HTMLInputElement | null = null
 
+/** Dismiss the icon picker and give the page its caret back — choosing an icon
+ *  leaves the focus nowhere otherwise. */
+function closeEmojiPicker(): HTMLElement | null {
+  if (emojiPicker.hidden) return null
+  emojiPicker.hidden = true
+  focusEditorSurface()
+  return emojiPicker
+}
+
 function pickIcon(icon: string): void {
   if (currentPage) {
     currentPage.icon = icon
@@ -1512,7 +1536,7 @@ function pickIcon(icon: string): void {
     scheduleSave()
     queueTreeRefresh()
   }
-  emojiPicker.hidden = true
+  closeEmojiPicker()
 }
 
 let emojiShown = 0
@@ -1597,18 +1621,17 @@ function buildEmojiPicker(): void {
 }
 
 pageIconEl.addEventListener('click', () => {
-  const rect = pageIconEl.getBoundingClientRect()
-  emojiPicker.hidden = !emojiPicker.hidden
   if (!emojiPicker.hidden) {
-    if (!emojiGrid) buildEmojiPicker()
-    emojiPicker.style.left = rect.left + 'px'
-    emojiPicker.style.top = rect.bottom + 6 + 'px'
-    emojiInput?.focus()
+    closeEmojiPicker()
+    return
   }
-})
-
-document.addEventListener('mousedown', (e) => {
-  if (!emojiPicker.hidden && !emojiPicker.contains(e.target as Node) && e.target !== pageIconEl) emojiPicker.hidden = true
+  const rect = pageIconEl.getBoundingClientRect()
+  if (!emojiGrid) buildEmojiPicker()
+  emojiPicker.style.left = rect.left + 'px'
+  emojiPicker.style.top = rect.bottom + 6 + 'px'
+  anchorFloat(emojiPicker, pageIconEl)
+  emojiPicker.hidden = false
+  emojiInput?.focus()
 })
 
 // ---- Export to PDF ----
@@ -1632,9 +1655,11 @@ function applyExportMenuState(): void {
   if (iconBox) iconBox.checked = exportIncludeIcon
 }
 
-function closeExportMenu(): void {
+function closeExportMenu(): HTMLElement | null {
   const menu = document.getElementById('export-menu')
-  if (menu) menu.hidden = true
+  if (!menu || menu.hidden) return null
+  menu.hidden = true
+  return menu
 }
 
 function toggleExportMenu(): void {
@@ -1642,6 +1667,7 @@ function toggleExportMenu(): void {
   if (!menu) return
   if (menu.hidden) {
     applyExportMenuState()
+    anchorFloat(menu, document.getElementById('export-pdf-btn'))
     menu.hidden = false
   } else {
     closeExportMenu()
@@ -1698,25 +1724,32 @@ function queueTreeRefresh(): void {
 }
 
 let crumbPop: HTMLElement | null = null
-function closeCrumbPop(): void {
-  if (crumbPop) {
-    crumbPop.remove()
-    crumbPop = null
-  }
+/** The crumb the open dropdown belongs to, so pressing it again closes. */
+let crumbPopAnchor: HTMLElement | null = null
+function closeCrumbPop(): HTMLElement | null {
+  const el = crumbPop
+  if (!el) return null
+  el.remove()
+  crumbPop = null
+  crumbPopAnchor = null
+  return el
 }
-document.addEventListener('mousedown', (e) => {
-  if (crumbPop && !crumbPop.contains(e.target as Node)) closeCrumbPop()
-})
 
 // Notion-style: clicking a crumb opens a dropdown of its siblings (the
 // children of its parent), with drill-down chevrons for pages that have kids.
 function showCrumbPop(anchor: HTMLElement, node: SidebarNodeLike): void {
+  if (crumbPop && crumbPopAnchor === anchor) {
+    closeCrumbPop()
+    return
+  }
   closeCrumbPop()
   if (!lastRoot) return
   const parent = findParentOf(lastRoot, node) ?? lastRoot
   const rows = parent.children ?? []
   crumbPop = document.createElement('div')
   crumbPop.className = 'crumb-pop'
+  crumbPopAnchor = anchor
+  anchorFloat(crumbPop, anchor)
   const renderRows = (list: SidebarNodeLike[], highlightRel: string | null): void => {
     if (!crumbPop) return
     crumbPop.innerHTML = ''
@@ -1891,6 +1924,8 @@ function toggleAgentPanel(): void {
   panel.hidden = !panel.hidden
   ;(document.getElementById('agent-resizer') as HTMLElement).hidden = panel.hidden
   ;(document.getElementById('toggle-agent-btn') as HTMLElement).classList.toggle('active', !panel.hidden)
+  // A hidden panel must not leave its popovers behind.
+  if (panel.hidden) agentPanel?.dismissFloats()
   void window.api.setSettings('agentOpen', !panel.hidden)
 }
 
@@ -1951,10 +1986,12 @@ const wsMenuEl = document.getElementById('ws-menu') as HTMLElement
 const lockBtn = document.getElementById('lock-ws-btn') as HTMLButtonElement
 const wsIconEl = document.getElementById('ws-icon') as HTMLElement
 
-function closeWsMenu(): void {
+function closeWsMenu(): HTMLElement | null {
+  if (wsMenuEl.hidden) return null
   wsMenuEl.hidden = true
   wsMenuEl.innerHTML = ''
   document.getElementById('workspace-switcher')?.classList.remove('open')
+  return wsMenuEl
 }
 
 async function renderWsMenu(): Promise<void> {
@@ -2056,21 +2093,17 @@ async function renderWsMenu(): Promise<void> {
   })
 }
 
-document.getElementById('workspace-switcher')!.addEventListener('click', (e) => {
-  e.stopPropagation()
+document.getElementById('workspace-switcher')!.addEventListener('click', () => {
+  const pill = document.getElementById('workspace-switcher') as HTMLElement
   if (!wsMenuEl.hidden) {
     closeWsMenu()
     return
   }
   void renderWsMenu().then(() => {
+    anchorFloat(wsMenuEl, pill)
     wsMenuEl.hidden = false
-    document.getElementById('workspace-switcher')?.classList.add('open')
+    pill.classList.add('open')
   })
-})
-document.addEventListener('mousedown', (e) => {
-  if (wsMenuEl.hidden) return
-  const t = e.target as Node
-  if (!wsMenuEl.contains(t) && t !== document.getElementById('workspace-switcher')) closeWsMenu()
 })
 
 // ---- lock screen (an encrypted workspace that isn't unlocked yet) ----
@@ -2086,6 +2119,15 @@ document.getElementById('locked-switch')!.addEventListener('click', () => {
 })
 
 // ---- password gate (create / unlock a private workspace) ----
+/** Returns the element it closed, so the shared dismissal pass (Escape, a
+ *  click elsewhere) can close the gate too. */
+function closePasswordGate(): HTMLElement | null {
+  const modal = document.getElementById('pw-modal')
+  if (!modal || modal.hidden) return null
+  modal.hidden = true
+  return modal
+}
+
 interface PasswordGateOpts {
   mode: 'create' | 'unlock'
   path?: string
@@ -2255,10 +2297,12 @@ function applyPageDisplay(): void {
   schedulePrintPreview(250)
 }
 
-function closePageViewMenu(): void {
+function closePageViewMenu(): HTMLElement | null {
   const menu = document.getElementById('page-view-menu')
-  if (menu) menu.hidden = true
+  if (!menu || menu.hidden) return null
+  menu.hidden = true
   document.getElementById('page-view-btn')?.classList.remove('open')
+  return menu
 }
 
 /** Render the current page through the print pipeline into the right pane. */
@@ -2968,12 +3012,14 @@ function openFind(): void {
 
 /** `restoreFocus` is false when the caller is about to show a different page
  *  anyway (opening one closes the bar as a side effect). */
-function closeFind(restoreFocus = false): void {
+function closeFind(restoreFocus = false): HTMLElement | null {
+  if (findBarEl.hidden) return null
   findBarEl.hidden = true
   findRanges = []
   clearFindHighlights()
   findCountEl.textContent = ''
   if (restoreFocus) focusEditorSurface()
+  return findBarEl
 }
 
 findInputEl.addEventListener('input', () => {
@@ -3128,9 +3174,11 @@ function openSearch(): void {
   searchInputEl.focus()
 }
 
-function closeSearch(restoreFocus = false): void {
+function closeSearch(restoreFocus = false): HTMLElement | null {
+  if (searchModalEl.hidden) return null
   searchModalEl.hidden = true
   if (restoreFocus) focusEditorSurface()
+  return searchModalEl
 }
 
 searchInputEl.addEventListener('input', () => {
@@ -3486,6 +3534,12 @@ async function init(): Promise<void> {
   applyExportMenuState()
 
   const wsModal = document.getElementById('workspace-modal') as HTMLElement
+  const closeWsModal = (): HTMLElement | null => {
+    if (wsModal.hidden) return null
+    wsModal.hidden = true
+    return wsModal
+  }
+  registerFloatCloser(closeWsModal)
   const showWsModal = (): void => {
     wsModal.hidden = false
     void (async () => {
@@ -3499,10 +3553,10 @@ async function init(): Promise<void> {
   document.getElementById('welcome-create')!.addEventListener('click', showWsModal)
   document.getElementById('welcome-open')!.addEventListener('click', () => void openExistingWorkspace())
   document.getElementById('ws-modal-close')!.addEventListener('click', () => {
-    wsModal.hidden = true
+    closeWsModal()
   })
   wsModal.addEventListener('mousedown', (e) => {
-    if (e.target === wsModal) wsModal.hidden = true
+    if (e.target === wsModal) closeWsModal()
   })
   document.getElementById('ws-open-existing')!.addEventListener('click', () => {
     wsModal.hidden = true
@@ -3641,12 +3695,9 @@ async function init(): Promise<void> {
   document.getElementById('toggle-agent-btn')!.addEventListener('click', toggleAgentPanel)
   document.getElementById('agent-close')!.addEventListener('click', toggleAgentPanel)
   toggleSourceBtn.addEventListener('click', toggleSource)
-  document.getElementById('export-pdf-btn')!.addEventListener('click', (e) => {
-    e.stopPropagation()
+  document.getElementById('export-pdf-btn')!.addEventListener('click', () => {
     toggleExportMenu()
   })
-  const exportMenuEl = document.getElementById('export-menu') as HTMLElement
-  exportMenuEl.addEventListener('click', (e) => e.stopPropagation())
   for (const btn of document.querySelectorAll<HTMLButtonElement>('.export-seg-btn[data-margin]')) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation()
@@ -3669,14 +3720,13 @@ async function init(): Promise<void> {
   // ---- page display options ----
   const pageViewMenu = document.getElementById('page-view-menu') as HTMLElement
   const pageViewBtn = document.getElementById('page-view-btn') as HTMLButtonElement
-  pageViewBtn.addEventListener('click', (e) => {
-    e.stopPropagation()
+  pageViewBtn.addEventListener('click', () => {
     applyExportMenuState()
     applyPageDisplay()
+    if (pageViewMenu.hidden) anchorFloat(pageViewMenu, pageViewBtn)
     pageViewMenu.hidden = !pageViewMenu.hidden
     pageViewBtn.classList.toggle('open', !pageViewMenu.hidden)
   })
-  pageViewMenu.addEventListener('click', (e) => e.stopPropagation())
   ;(document.getElementById('pv-title') as HTMLInputElement).addEventListener('change', (e) => {
     showPageTitle = (e.target as HTMLInputElement).checked
     void window.api.setSettings('showPageTitle', showPageTitle)
@@ -3686,11 +3736,6 @@ async function init(): Promise<void> {
     showPageIcon = (e.target as HTMLInputElement).checked
     void window.api.setSettings('showPageIcon', showPageIcon)
     applyPageDisplay()
-  })
-  document.addEventListener('click', () => closePageViewMenu())
-  document.addEventListener('click', () => closeExportMenu())
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeExportMenu()
   })
   document.getElementById('action-add-icon')!.addEventListener('click', () => {
     pageIconEl.click()
@@ -3800,6 +3845,25 @@ async function init(): Promise<void> {
       }
     })()
   })
+
+  // ---- floating surfaces: one dismissal pass for all of them --------------
+  // Escape, a click anywhere outside, a scroll, or leaving the window closes
+  // whatever is open — including the editor's own menus and the agent's.
+  // The find bar and the search palette are things you scroll and alt-tab
+  // *while using*; only Escape, an outside click or leaving the page close them.
+  registerFloatCloser(() => closeFind(true), { onScroll: false, onBlur: false })
+  registerFloatCloser(() => closeSearch(true), { onScroll: false, onBlur: false })
+  registerFloatCloser(() => closeWsMenu())
+  registerFloatCloser(() => closeExportMenu())
+  registerFloatCloser(() => closePageViewMenu())
+  registerFloatCloser(() => closeCrumbPop())
+  registerFloatCloser(() => closeEmojiPicker())
+  registerFloatCloser(() => closeTabPicker())
+  registerFloatCloser(() => closePasswordGate())
+  registerFloatCloser(() => settingsApi.close())
+  registerFloatCloser(() => dismissEditorFloats())
+  registerFloatCloser(() => agentApi.dismissFloats())
+  installFloatDismissal()
 
   const sidebarW = settings['sidebarWidth'] as number | undefined
   const agentW = settings['agentWidth'] as number | undefined

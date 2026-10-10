@@ -51,7 +51,7 @@ interface SettingsOpts {
   onFontChange: (id: string) => void
 }
 
-export function setupSettings(opts: SettingsOpts): { show: () => void } {
+export function setupSettings(opts: SettingsOpts): { show: () => void; close: () => HTMLElement | null } {
   const backdrop = document.getElementById('settings-modal') as HTMLElement
   const workspacePathEl = document.getElementById('settings-workspace-path') as HTMLElement
   const themeSelect = document.getElementById('settings-theme') as HTMLSelectElement
@@ -528,11 +528,19 @@ export function setupSettings(opts: SettingsOpts): { show: () => void } {
     void load()
   }
 
+  /** Returns the element it closed, so the shared dismissal pass (Escape, a
+   *  click elsewhere) can close the modal too. */
+  function close(): HTMLElement | null {
+    if (backdrop.hidden) return null
+    backdrop.hidden = true
+    return backdrop
+  }
+
   backdrop.addEventListener('mousedown', (e) => {
-    if (e.target === backdrop) backdrop.hidden = true
+    if (e.target === backdrop) close()
   })
   document.getElementById('settings-close')?.addEventListener('click', () => {
-    backdrop.hidden = true
+    close()
   })
 
   // Cancel = discard whatever hasn't been flushed yet and reload from disk.
@@ -546,5 +554,5 @@ export function setupSettings(opts: SettingsOpts): { show: () => void } {
     })
   })
 
-  return { show }
+  return { show, close }
 }

@@ -5278,71 +5278,190 @@ code {
 
 /* ============================================================
    Motion system
-   Subtle and Notion-like: short, decelerating, no bounce. Every overlay
-   here is toggled with the [hidden] attribute, so it cannot use a CSS
-   transition (display:none doesn't interpolate) — instead it plays a
-   keyframe animation, which the browser runs the moment the element is
-   rendered. Enter only: overlays still dismiss instantly, which is what
-   makes menus feel responsive.
+   Everything here appears and disappears by toggling the [hidden]
+   attribute, i.e. display:none — a value that normally cannot be
+   interpolated, which is why surfaces used to blink in with an
+   animation and blink *out* with nothing at all. Two things fix that:
+   `transition-behavior: allow-discrete` keeps the element painted (and
+   out of the pointer's way) while it animates out, and `@starting-style`
+   supplies the frame it animates from on the way in. Every surface now
+   has a real entrance and a real exit with no JS hooks to forget.
+
+   Arrivals decelerate and take their time; dismissals accelerate and are
+   over sooner. That asymmetry is what makes a menu feel like it answered
+   you instead of vanishing out from under the cursor.
    ============================================================ */
 :root {
-  --dur-fast: 120ms;
-  --dur: 170ms;
-  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 140ms; /* hover, press, colour */
+  --dur: 240ms;      /* popovers, cards, find bar */
+  --dur-slow: 380ms; /* modals, panels */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 0.5);
 }
 
-@keyframes y-pop-in {
-  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
-  to { opacity: 1; transform: none; }
-}
-
-@keyframes y-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes y-card-in {
-  from { opacity: 0; transform: translateY(8px) scale(0.985); }
-  to { opacity: 1; transform: none; }
-}
-
-@keyframes y-drop-in {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: none; }
-}
-
-/* Menus, popovers, pickers, toolbars. */
-.crumb-pop,
-.ws-menu,
-.slash-menu,
-.agent-slash-menu,
-.emoji-picker,
-.agent-recent-pop,
-.export-menu,
-.page-view-menu,
-.page-picker,
-.tab-picker,
-.table-size-picker,
-.table-toolbar,
-.highlight-popup,
-.math-editor-popup {
-  animation: y-pop-in var(--dur) var(--ease) both;
+/* Menus, popovers, pickers, toolbars: anchored to something, so they grow
+   out of their top edge and shrink back into it. */
+:is(
+    .crumb-pop, .ws-menu, .slash-menu, .agent-slash-menu, .emoji-picker,
+    .agent-recent-pop, .export-menu, .page-view-menu, .tab-picker,
+    .table-size-picker, .table-toolbar, .highlight-popup, .math-editor-popup
+  ) {
   transform-origin: top center;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    display var(--dur) allow-discrete;
+}
+
+:is(
+    .crumb-pop, .ws-menu, .slash-menu, .agent-slash-menu, .emoji-picker,
+    .agent-recent-pop, .export-menu, .page-view-menu, .tab-picker,
+    .table-size-picker, .table-toolbar, .highlight-popup, .math-editor-popup
+  )[hidden] {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.96);
+  pointer-events: none; /* never swallow the click that dismissed it */
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  :is(
+      .crumb-pop, .ws-menu, .slash-menu, .agent-slash-menu, .emoji-picker,
+      .agent-recent-pop, .export-menu, .page-view-menu, .tab-picker,
+      .table-size-picker, .table-toolbar, .highlight-popup, .math-editor-popup
+    ) {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+}
+
+/* The page picker is centred with a transform of its own, so it needs the
+   same three states with translateX(-50%) kept in every one of them. */
+.page-picker {
+  transform: translateX(-50%);
+  transform-origin: top center;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    display var(--dur) allow-discrete;
+}
+
+.page-picker[hidden] {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-6px) scale(0.96);
+  pointer-events: none;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .page-picker {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-9px) scale(0.945);
+  }
 }
 
 /* The find bar drops in from the top edge. */
 .find-bar {
-  animation: y-drop-in var(--dur) var(--ease) both;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    display var(--dur) allow-discrete;
 }
 
-/* Modals: scrim fades, card lifts. */
+.find-bar[hidden] {
+  opacity: 0;
+  transform: translateY(-18px);
+  pointer-events: none;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .find-bar:not([hidden]) {
+    opacity: 0;
+    transform: translateY(-22px);
+  }
+}
+
+/* Modals: the scrim settles, the card rises into place. */
 .modal-backdrop {
-  animation: y-fade-in var(--dur-fast) var(--ease) both;
+  transition: opacity var(--dur) var(--ease), display var(--dur) allow-discrete;
+}
+
+.modal-backdrop[hidden] {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .modal-backdrop:not([hidden]) {
+    opacity: 0;
+  }
 }
 
 .modal,
+.search-panel {
+  transition:
+    opacity var(--dur-slow) var(--ease),
+    transform var(--dur-slow) var(--ease);
+}
+
+.modal-backdrop[hidden] .modal,
+.modal-backdrop[hidden] .search-panel {
+  opacity: 0;
+  transform: translateY(24px) scale(0.94);
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .modal-backdrop:not([hidden]) .modal,
+  .modal-backdrop:not([hidden]) .search-panel {
+    opacity: 0;
+    transform: translateY(30px) scale(0.93);
+  }
+}
+
+/* The workspace search is its own scrim: it fades while its panel rises. */
 .search-modal {
-  animation: y-card-in var(--dur) var(--ease) both;
+  transition: opacity var(--dur) var(--ease), display var(--dur) allow-discrete;
+}
+
+.search-modal[hidden] {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .search-modal:not([hidden]) {
+    opacity: 0;
+  }
+}
+
+.search-modal .search-panel {
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.search-modal[hidden] .search-panel {
+  opacity: 0;
+  transform: translateY(18px) scale(0.96);
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .search-modal:not([hidden]) .search-panel {
+    opacity: 0;
+    transform: translateY(24px) scale(0.95);
+  }
 }
 
 /* Sidebar tree: animate the expand/collapse instead of snapping. The outer
@@ -5447,27 +5566,7 @@ code {
   :root {
     --dur-fast: 1ms;
     --dur: 1ms;
-  }
-
-  .crumb-pop,
-  .ws-menu,
-  .slash-menu,
-  .agent-slash-menu,
-  .emoji-picker,
-  .agent-recent-pop,
-  .export-menu,
-  .page-view-menu,
-  .page-picker,
-  .tab-picker,
-  .table-size-picker,
-  .table-toolbar,
-  .highlight-popup,
-  .math-editor-popup,
-  .find-bar,
-  .modal-backdrop,
-  .modal,
-  .search-modal {
-    animation: none;
+    --dur-slow: 1ms;
   }
 
   .tree-children {
@@ -5487,30 +5586,34 @@ code {
   }
 }
 
-/* Panel show/hide (sidebar, agent): a short slide+fade on the way in.
-   Transform/opacity only — the resizer measures the element's box, so
-   animating flex-basis or width would fight it. */
+/* Panels (sidebar, agent, split pane) slide in. Layout-affecting surfaces
+   stay on keyframes deliberately: the resizer measures these boxes, and the
+   discrete-display trick would hold their space open for the length of the
+   exit and then snap the page — a reflow at the end of the animation reads
+   worse than the pane simply leaving. Transform/opacity only, never width. */
 @keyframes y-slide-in-left {
-  from { opacity: 0; transform: translateX(-10px); }
+  from { opacity: 0; transform: translateX(-64px); }
   to { opacity: 1; transform: none; }
 }
 
 @keyframes y-slide-in-right {
-  from { opacity: 0; transform: translateX(10px); }
+  from { opacity: 0; transform: translateX(64px); }
   to { opacity: 1; transform: none; }
 }
 
 #sidebar:not([hidden]) {
-  animation: y-slide-in-left var(--dur) var(--ease) both;
+  animation: y-slide-in-left 300ms var(--ease) both;
 }
 
-#agent-panel:not([hidden]) {
-  animation: y-slide-in-right var(--dur) var(--ease) both;
+#agent-panel:not([hidden]),
+#split-right:not([hidden]) {
+  animation: y-slide-in-right 300ms var(--ease) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
   #sidebar:not([hidden]),
-  #agent-panel:not([hidden]) {
+  #agent-panel:not([hidden]),
+  #split-right:not([hidden]) {
     animation: none;
   }
 }
