@@ -1505,6 +1505,12 @@ body.resizing-h {
 
 .markdown-body th,
 .markdown-body td {
+  /* A cell has to be a containing block: the cell-selection wash below is an
+     absolutely positioned overlay, and with no positioned cell it resolved
+     against the editor's own (very tall) box instead — one document-sized
+     translucent rectangle per selected cell, stacked, which is what turned a
+     drag across a table into a solid blue slab. */
+  position: relative;
   border: 1px solid var(--border);
   padding: 4px 9px;
   line-height: 1.4;
