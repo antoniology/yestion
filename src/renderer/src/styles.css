@@ -2141,13 +2141,15 @@ body.resizing-h {
   margin: 0.9em 0;
 }
 
-.markdown-body .selectedCell::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: var(--selection);
-  pointer-events: none;
-  z-index: 2;
+/* Cells the editor has promoted to a cell-selection. The wash stops at the
+   text: an inset:0 overlay also painted each cell's padding, so dragging over
+   a few rows turned the gutters between the words blue as well. Clipping to the
+   content box keeps the tint where the words are, and lets the text sit on top
+   of it instead of under a translucent sheet. */
+.markdown-body th.selectedCell,
+.markdown-body td.selectedCell {
+  background-color: var(--selection);
+  background-clip: content-box;
 }
 
 /* ============================================================
@@ -3303,6 +3305,38 @@ body.resizing-h {
    ============================================================ */
 
 @media print {
+  /* Paper is always light. In a dark theme --text is near-white, so the live PDF
+     preview (and the printed page) came out as pale grey on white — a page that
+     reads as blank. The theme vars are set as INLINE custom properties on <html>
+     by applyTheme, so these overrides need !important to win. */
+  html {
+    color-scheme: light !important;
+    --text: #1f2328 !important;
+    --text-2: #1f2328 !important;
+    --muted: #59636e !important;
+    --muted-2: #59636e !important;
+    --muted-3: #6e7781 !important;
+    --accent: #0969da !important;
+    --border: #d1d9e0 !important;
+    --border-strong: #b8c0c8 !important;
+    --divider-bg: #e6e8eb !important;
+    --selection: rgba(9, 105, 218, 0.2) !important;
+    --md-heading: #1f2328 !important;
+    --md-strong: #1f2328 !important;
+    --md-em: #1f2328 !important;
+    --md-link: #0969da !important;
+    --md-url: #8250df !important;
+    --md-quote: #59636e !important;
+    --md-list: #1f2328 !important;
+    --md-meta: #59636e !important;
+    --md-keyword: #0969da !important;
+    --md-code: #cf222e !important;
+    --code-text: #1f2328 !important;
+    --code-bg: #f6f8fa !important;
+    --quote-bg: #f6f8fa !important;
+    --quote-border: #d1d9e0 !important;
+  }
+
   /* The app shell is a viewport-sized flex box (body height:100%, overflow
      hidden). Left as-is, Chromium lays the page out at the window width and
      then scales the whole thing down to fit A4 — which made every word tiny.
@@ -3361,6 +3395,7 @@ body.resizing-h {
   .toolbar-card {
     margin: 0 !important;
     box-shadow: none !important;
+    border: none !important;
     border-radius: 0 !important;
   }
 
@@ -4270,8 +4305,9 @@ body.resizing-h { cursor: col-resize; user-select: none; }
 [data-theme-kind='dark'] #welcome,
 [data-theme-kind='dark'] #locked-view,
 [data-theme-kind='dark'] #page-loader,
-[data-theme-kind='dark'] .tab-bar,
-[data-theme-kind='dark'] .crumb-bar {
+/* the tab strip and the breadcrumb row share one card, and that card is the
+   rounded thing — a border on the bars themselves squared off the corners */
+[data-theme-kind='dark'] .toolbar-card {
   border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 
