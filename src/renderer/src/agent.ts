@@ -178,6 +178,27 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   let textRaf: number | null = null
   let toolSeq = 0
 
+  /**
+   * The text block the turn that was just closed ended with, kept while nothing
+   * new has been said.
+   *
+   * pi replays a finished message's stream events (its text_end and its
+   * message_end, carrying the whole answer) *after* the prompt promise has
+   * resolved — and resolving the promise is what calls endTurn(). With the turn
+   * already closed those replays ran ensureText(), which started a brand new
+   * turn: the answer appeared a second time, as a bare ✨ row with no groups.
+   * Anything that arrives between turns belongs to the turn on screen, so it is
+   * folded back into this block instead of opening another one.
+   */
+  let closedTurnText: { item: TextItem; el: HTMLElement } | null = null
+  /** True from the moment a turn closes until the user says something new. */
+  let betweenTurns = false
+  /** Deltas seen since the turn closed, to tell a replay from a live tail. */
+  let lateDeltaBuf = ''
+  let lateDropLogged = false
+  /** Last notice shown in the open turn, so a replayed event cannot double it. */
+  let lastNoticeText = ''
+
   function makeGroup(labelText: string, metaText: string): {
     group: HTMLElement
     meta: HTMLElement
@@ -214,6 +235,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
 
   function ensureTurnContent(): HTMLElement {
     if (turnContentEl) return turnContentEl
+    // A genuinely new turn: whatever the previous one left behind is no longer
+    // the newest thing on screen, so late events are no longer folded into it.
+    betweenTurns = false
+    closedTurnText = null
+    lateDeltaBuf = ''
+    lastNoticeText = ''
     const msg: ChatMsg = { role: 'assistant', items: [] }
     history.push(msg)
     currentTurn = msg
@@ -234,11 +261,69 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
 
   function endTurn(): void {
     turnContentEl?.querySelectorAll('.agent-group').forEach((g) => setGroupOpen(g as HTMLElement, false))
+    // Remember what it ended with *before* dropping the handles: the answer's
+    // text node stays addressable so a replayed stream can be folded into it.
+    if (turnContentEl) {
+      closedTurnText = liveText
+      lateDeltaBuf = ''
+      lateDropLogged = false
+      betweenTurns = true
+    }
     currentTurn = null
     turnContentEl = null
     liveThinking = null
     liveTools = null
     liveText = null
+  }
+
+  /**
+   * The provider re-sent text for a turn that is already finished on screen.
+   * Full-message replays either carry more than we rendered (the deltas stopped
+   * early — extend in place) or are the same answer again (drop it).
+   */
+  function foldLateText(full: string, what: string): void {
+    const closed = closedTurnText
+    const shown = closed?.item.text ?? ''
+    if (closed && full.length > shown.length && full.startsWith(shown)) {
+      closed.item.text = full
+      closed.el.innerHTML = renderAgentMarkdown(full)
+      lateDeltaBuf = ''
+      logLine('info', `agent: late ${what} completed the closed turn (${shown.length} → ${full.length} chars)`)
+      return
+    }
+    noteLateDrop(what, full.length)
+  }
+
+  /**
+   * Deltas that arrive after the turn closed are either a replay of text that
+   * is already rendered (skip it) or the tail of an answer the provider kept
+   * streaming past the prompt promise (append it). The buffer tells them apart.
+   */
+  function appendLateDelta(delta: string): void {
+    const closed = closedTurnText
+    if (!closed) {
+      noteLateDrop('text_delta', delta.length)
+      return
+    }
+    const next = lateDeltaBuf + delta
+    if (closed.item.text.startsWith(next)) {
+      lateDeltaBuf = next
+      noteLateDrop('text_delta', delta.length)
+      return
+    }
+    lateDeltaBuf = ''
+    closed.item.text += delta
+    closed.el.innerHTML = renderAgentMarkdown(closed.item.text)
+    messagesEl.scrollTop = messagesEl.scrollHeight
+  }
+
+  function noteLateDrop(what: string, chars: number): void {
+    if (lateDropLogged) return
+    lateDropLogged = true
+    logLine(
+      'info',
+      `agent: dropped a replayed ${what} (${chars} chars) — the turn it belongs to was already rendered; this used to appear as a duplicate answer`
+    )
   }
 
   function collapseAllGroups(): void {
@@ -313,7 +398,16 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
 
   /** A short inline note in the transcript (stream errors, truncation, …). */
   function addNotice(text: string, kind: 'info' | 'warn' = 'info'): void {
-    const content = ensureTurnContent()
+    // turn_end and the finished message_end carry the same stop reason, so the
+    // same sentence was printed twice in one turn — a replay on top of that
+    // made it three. Once per turn is enough.
+    if (text === lastNoticeText) return
+    // A late notice about the turn that just finished belongs in that turn.
+    // ensureTurnContent() would open another ✨ row for it — and clear the
+    // between-turns guard, which is what let a replayed answer land there.
+    const closedRow = closedTurnText?.el.parentElement ?? null
+    const content = betweenTurns && closedRow ? closedRow : ensureTurnContent()
+    lastNoticeText = text
     const el = document.createElement('div')
     el.className = 'agent-notice' + (kind === 'warn' ? ' warn' : '')
     el.textContent = text
@@ -440,6 +534,13 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   }
 
   function addMsg(role: ChatMsg['role'], text = '', images?: Attachment[]): HTMLElement {
+    if (role === 'user') {
+      // A new question: nothing that arrives from here on belongs to the turn
+      // we just finished, so stop folding late events into it.
+      betweenTurns = false
+      closedTurnText = null
+      lateDeltaBuf = ''
+    }
     const msg: ChatMsg = { role, text }
     history.push(msg)
     const hint = messagesEl.querySelector('.agent-empty-wrap')
@@ -597,6 +698,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   async function loadTranscript(path: string): Promise<number> {
     const messages = await window.api.agentSessionMessages(path)
     if (!Array.isArray(messages)) return 0
+    betweenTurns = false
+    closedTurnText = null
+    lateDeltaBuf = ''
+    lastNoticeText = ''
     history.length = 0
     history.push(...messagesToHistory(messages))
     agentCtxInput = 0
@@ -621,6 +726,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   }
 
   function clearTranscript(): void {
+    // renderHistory() rebuilds the rows from scratch, so the folded-into node
+    // from the old transcript is about to be detached.
+    betweenTurns = false
+    closedTurnText = null
+    lateDeltaBuf = ''
+    lastNoticeText = ''
     history.length = 0
     agentCtxInput = 0
     updateStats()
@@ -901,6 +1012,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
 
     if (type === 'tool_execution_start') {
       showTyping(false)
+      // The finished turn's tool calls, replayed after it closed. Running them
+      // through ensureTools() again would rebuild every command box a second
+      // time inside a new turn.
+      if (betweenTurns) return
       const tools = ensureTools()
       if (!tools) return
       const id = toolIdOf(ev)
@@ -963,9 +1078,17 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
         | { content?: unknown; stopReason?: string; usage?: Record<string, unknown> }
         | undefined
       const full = extractText(msg?.content)
-      if (full && liveText && full.length > liveText.item.text.length) {
-        liveText.item.text = full
-        scheduleTextRender()
+      if (full) {
+        if (liveText) {
+          if (full.length > liveText.item.text.length) {
+            liveText.item.text = full
+            scheduleTextRender()
+          }
+        } else if (betweenTurns) {
+          // The finished message, replayed after its turn was closed. Fold it
+          // into the turn on screen rather than leaving a copy behind.
+          foldLateText(full, type)
+        }
       }
       const stop = msg?.stopReason ?? ''
       logLine(
@@ -1014,6 +1137,8 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     if (!ame) return
 
     if (ame.type === 'thinking_delta' && ame.delta) {
+      // Replayed reasoning for a turn that already rendered its groups.
+      if (betweenTurns) return
       showTyping(false)
       const thinking = ensureThinking()
       if (!thinking) return
@@ -1040,6 +1165,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     }
 
     if (ame.type === 'text_end' && typeof ame.content === 'string') {
+      if (betweenTurns) {
+        foldLateText(ame.content, 'text_end')
+        return
+      }
       const text = ensureText()
       if (text && ame.content.length > text.item.text.length) {
         text.item.text = ame.content
@@ -1049,6 +1178,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     }
 
     if (ame.type === 'text_delta' && ame.delta) {
+      if (betweenTurns) {
+        appendLateDelta(ame.delta)
+        return
+      }
       showTyping(false)
       const text = ensureText()
       if (!text) return
@@ -1428,8 +1561,11 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     input.style.height = 'auto'
     attachments = []
     renderAttachments()
-    addMsg('user', text, sentAttachments)
+    // Close the previous turn *before* the user row goes in: addMsg() clears
+    // the between-turns guard, and endTurn() would set it again — swallowing
+    // the answer to the question we are about to ask.
     endTurn()
+    addMsg('user', text, sentAttachments)
     showTyping(true)
     try {
       // Keys come from ~/.pi/agent/auth.json via the shared ModelRuntime; a
