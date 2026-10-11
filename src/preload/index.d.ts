@@ -45,7 +45,7 @@ export interface Api {
   }>
   wsChoose: () => Promise<string | null>
   dirChoose: () => Promise<string | null>
-  filePick: () => Promise<{ path: string; name: string } | null>
+  filePick: (title?: string) => Promise<{ path: string; name: string } | null>
   readTextFile: (relPath: string) => Promise<{ content: string; absolutePath: string } | null>
   fileKind: (relPath: string) => Promise<'pdf' | 'image' | 'text' | 'binary' | null>
   writeTextFile: (relPath: string, content: string) => Promise<boolean>

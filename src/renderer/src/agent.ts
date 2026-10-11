@@ -1501,20 +1501,61 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   })
 
   // Drag & drop images anywhere on the agent panel.
+  //
+  // The cue is a whole-panel outline, so it has to survive the pointer crossing
+  // the panel's own children: dragenter/dragleave fire for every element in and
+  // out of the path, and a plain boolean gets cleared by the first child left.
+  // Count entries instead, and make sure every way a drag can end takes the cue
+  // down — including the ones that never deliver a dragleave, which is how the
+  // dashed "Drop image to attach" outline used to stay painted on the panel
+  // after a drag was released outside the window.
   const panelEl = document.getElementById('agent-panel') as HTMLElement
-  panelEl.addEventListener('dragover', (e) => {
-    if (!e.dataTransfer) return
-    const hasFiles = Array.from(e.dataTransfer.types ?? []).includes('Files')
-    if (!hasFiles) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
+  let dragDepth = 0
+  let dragSeenAt = 0
+  let dragWatchdog: number | null = null
+  const dragHasFiles = (e: DragEvent): boolean =>
+    !!e.dataTransfer && Array.from(e.dataTransfer.types ?? []).includes('Files')
+  const stopDragWatchdog = (): void => {
+    if (dragWatchdog === null) return
+    window.clearInterval(dragWatchdog)
+    dragWatchdog = null
+  }
+  const clearDragCue = (): void => {
+    dragDepth = 0
+    panelEl.classList.remove('agent-drag-over')
+    stopDragWatchdog()
+  }
+  /** While the cue is up, re-check it: a drag session that ended without a
+   *  dragleave (cancelled with Escape, released over another app) sends the
+   *  panel nothing at all, and the cue would otherwise be stuck until the next
+   *  drop. dragover repeats while the file is genuinely held over the panel. */
+  const armDragWatchdog = (): void => {
+    dragSeenAt = performance.now()
+    if (dragWatchdog !== null) return
+    dragWatchdog = window.setInterval(() => {
+      if (performance.now() - dragSeenAt > 800) clearDragCue()
+    }, 250)
+  }
+  panelEl.addEventListener('dragenter', (e) => {
+    if (!dragHasFiles(e)) return
+    dragDepth++
     panelEl.classList.add('agent-drag-over')
+    armDragWatchdog()
+  })
+  panelEl.addEventListener('dragover', (e) => {
+    if (!dragHasFiles(e)) return
+    e.preventDefault()
+    e.dataTransfer!.dropEffect = 'copy'
+    panelEl.classList.add('agent-drag-over')
+    armDragWatchdog()
   })
   panelEl.addEventListener('dragleave', (e) => {
-    if (e.target === panelEl) panelEl.classList.remove('agent-drag-over')
+    if (!dragHasFiles(e)) return
+    dragDepth = Math.max(0, dragDepth - 1)
+    if (dragDepth === 0) clearDragCue()
   })
   panelEl.addEventListener('drop', (e) => {
-    panelEl.classList.remove('agent-drag-over')
+    clearDragCue()
     const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/'))
     if (files.length === 0) return
     e.preventDefault()
@@ -1529,6 +1570,13 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       reader.readAsDataURL(file)
     }
   })
+  // The drag session belongs to the whole window, not the panel, so the ways it
+  // can end without a panel dragleave are caught out here.
+  document.addEventListener('dragend', clearDragCue)
+  document.addEventListener('dragleave', (e) => {
+    if (!e.relatedTarget) clearDragCue() // nothing left to move onto → out of the window
+  })
+  window.addEventListener('blur', clearDragCue)
 
   // Paste an image straight from the clipboard (screenshots).
   input.addEventListener('paste', (e) => {

@@ -47,7 +47,6 @@ export const FLOAT_SELECTOR = [
   '.export-menu',
   '.page-view-menu',
   '.page-picker',
-  '.tab-picker',
   '.table-size-picker',
   '.table-toolbar',
   '.highlight-popup',

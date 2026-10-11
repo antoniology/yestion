@@ -271,10 +271,10 @@ function registerWorkspaceHandlers(): void {
       previewFont: settingsStore.get('previewFont') as string | undefined
     }
   })
-  ipcMain.handle('file:pick', async () => {
+  ipcMain.handle('file:pick', async (_e, title?: string) => {
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow
     const result = await dialog.showOpenDialog(win!, {
-      title: 'Link a file (PDF, image, …)',
+      title: title || 'Link a file (PDF, image, …)',
       properties: ['openFile']
     })
     if (result.canceled || result.filePaths.length === 0) return null
@@ -913,6 +913,21 @@ function registerAgentHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
     if (!win) return
     const action = (a: string): void => send('item:action', { action: a, ...payload })
+    // A blank tab has no file behind it: nothing to open, reveal or copy.
+    if (payload.kind === 'new') {
+      const blankItems: Electron.MenuItemConstructorOptions[] = [
+        { label: 'Close Tab', click: () => action('close-tab') },
+        { label: 'Close Other Tabs', click: () => action('close-others') }
+      ]
+      if (process.env.YESTION_MENU_DRY_RUN === '1') {
+        console.log('[item-menu]', JSON.stringify(payload))
+        return
+      }
+      const blankMenu = Menu.buildFromTemplate(blankItems)
+      const blankWin = BrowserWindow.fromWebContents(event.sender)
+      if (blankWin) blankMenu.popup({ window: blankWin })
+      return
+    }
     const items: Electron.MenuItemConstructorOptions[] = [
       { label: 'Open', click: () => action('open') },
       { label: 'Open in New Tab', click: () => action('new-tab') },

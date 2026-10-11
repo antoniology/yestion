@@ -240,6 +240,64 @@
           <div id="text-mount" class="text-mount"></div>
         </div>
 
+        <div id="newtab-pane" class="newtab-pane" hidden>
+          <div class="newtab-scroll">
+            <div class="newtab-inner">
+              <header class="newtab-head">
+                <h1 class="newtab-title">New tab</h1>
+                <p class="newtab-sub">Start something new, or pick up where you left off.</p>
+              </header>
+
+              <div class="newtab-search">
+                <span class="newtab-search-icon" aria-hidden="true">🔍</span>
+                <input
+                  id="newtab-search"
+                  class="newtab-search-input"
+                  type="text"
+                  placeholder="Search pages…"
+                  spellcheck="false"
+                  autocomplete="off"
+                  aria-label="Search pages"
+                />
+                <span id="newtab-search-hint" class="newtab-search-hint" hidden>esc</span>
+              </div>
+
+              <div class="newtab-actions">
+                <button id="newtab-new-page" class="newtab-action" type="button">
+                  <span class="newtab-action-icon" aria-hidden="true">📄</span>
+                  <span class="newtab-action-text">
+                    <span class="newtab-action-title">New page</span>
+                    <span class="newtab-action-sub">A blank markdown file</span>
+                  </span>
+                </button>
+                <button id="newtab-open-file" class="newtab-action" type="button">
+                  <span class="newtab-action-icon" aria-hidden="true">📎</span>
+                  <span class="newtab-action-text">
+                    <span class="newtab-action-title">Open a file</span>
+                    <span class="newtab-action-sub">PDF, image or text</span>
+                  </span>
+                </button>
+                <button id="newtab-search-ws" class="newtab-action" type="button">
+                  <span class="newtab-action-icon" aria-hidden="true">🔎</span>
+                  <span class="newtab-action-text">
+                    <span class="newtab-action-title">Search in workspace</span>
+                    <span class="newtab-action-sub">Find pages by what is in them</span>
+                  </span>
+                </button>
+              </div>
+
+              <section class="newtab-section">
+                <div class="newtab-section-head">
+                  <span id="newtab-list-label">Recent</span>
+                  <span id="newtab-list-count" class="newtab-list-count"></span>
+                </div>
+                <div id="newtab-list" class="newtab-list"></div>
+                <p id="newtab-list-empty" class="newtab-list-empty" hidden></p>
+              </section>
+            </div>
+          </div>
+        </div>
+
         <div id="empty-state" class="empty-state" hidden>
           <h2>No pages yet</h2>
           <p>This workspace is a folder on disk. Create your first page — it becomes a plain <code>.md</code> file.</p>

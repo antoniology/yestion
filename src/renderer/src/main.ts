@@ -10,6 +10,7 @@ import { EMOJI_LIST, EMOJI_GROUPS } from './emoji-data'
 import { anchorFloat, dismissFloats, installFloatDismissal, registerFloatCloser } from './floats'
 import './styles.css'
 import { createPdfViewer, type PdfViewerHandle } from './pdf-viewer'
+import { createNewTabPane, type NewTabItem } from './newtab'
 
 // Fonts live in ./fonts.ts (shared with the settings modal).
 
@@ -449,7 +450,11 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   setSaveStatus('')
   releasePdfViewer()
   pdfPaneEl.hidden = true
+  // Every other opener hides the three viewers it isn't; this one used to
+  // leave an image pane on screen underneath the page that replaced it.
+  imagePaneEl.hidden = true
   textPaneEl.hidden = true
+  newTabPane.hide()
   currentFile = null
   pageViewEl.hidden = false
   welcomeEl.hidden = true
@@ -484,7 +489,10 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
 // ---------------------------------------------------------------------------
 interface TabInfo {
   relPath: string
-  kind: 'page' | 'pdf' | 'image' | 'file' | 'binary'
+  /** 'new' is a blank tab: it holds no file, only the landing page. Its
+   *  relPath is a synthetic key (`__newtab__:…`) so the strip can still key
+   *  tabs by path. */
+  kind: 'page' | 'pdf' | 'image' | 'file' | 'binary' | 'new'
   title: string
   icon?: string
   /** Remembered scroll position of this tab's content. */
@@ -575,6 +583,7 @@ function recordNavFromIndex(): void {
 const tabBarEl = document.getElementById('tab-bar') as HTMLElement
 
 function tabIconFor(tab: TabInfo): string {
+  if (tab.kind === 'new') return '✦'
   if (tab.icon) return tab.icon
   if (tab.kind === 'pdf') return '📕'
   if (tab.kind === 'image') return '🖼'
@@ -736,6 +745,7 @@ function captureActiveScroll(): number | undefined {
     const el = textMountEl.querySelector('.cm-scroller') as HTMLElement | null
     return el?.scrollTop ?? 0
   }
+  if (!newTabPane.el.hidden) return newTabPane.scrollEl.scrollTop
   return undefined
 }
 
@@ -751,6 +761,8 @@ function restoreActiveScroll(top: number | undefined): void {
   } else if (!textPaneEl.hidden) {
     const el = textMountEl.querySelector('.cm-scroller') as HTMLElement | null
     if (el) el.scrollTop = top
+  } else if (!newTabPane.el.hidden) {
+    newTabPane.scrollEl.scrollTop = top
   }
 }
 
@@ -776,6 +788,7 @@ function shownRelPath(): string | null {
   if (!pdfPaneEl.hidden) return currentPdfPath
   if (!imagePaneEl.hidden) return currentImagePath
   if (!textPaneEl.hidden) return currentFile?.relPath ?? null
+  if (!newTabPane.el.hidden) return tabs[activeTab]?.relPath ?? null
   return null
 }
 
@@ -795,11 +808,14 @@ function scrollForTab(tab: TabInfo): number | undefined {
 }
 
 async function loadTabContent(tab: TabInfo): Promise<void> {
-  recordNav({ rel: tab.relPath, kind: tab.kind, title: tab.title })
+  // A blank tab is a destination of its own, not a stop in the history: back
+  // should step over it rather than land on an empty page.
+  if (tab.kind !== 'new') recordNav({ rel: tab.relPath, kind: tab.kind, title: tab.title })
   // Menus and pickers from the tab we're leaving don't belong over this one.
   dismissFloats()
   try {
-    if (tab.kind === 'pdf') await openPdf(tab.relPath, { tab: false })
+    if (tab.kind === 'new') showNewTab()
+    else if (tab.kind === 'pdf') await openPdf(tab.relPath, { tab: false })
     else if (tab.kind === 'image') await openImage(tab.relPath, { tab: false })
     else if (tab.kind === 'file' || tab.kind === 'binary') await openTextFile(tab.relPath, { tab: false })
     else await openPageByRel(tab.relPath)
@@ -820,7 +836,7 @@ function closeTab(i: number): void {
     activeTab = 0
     renderTabs()
     persistTabs()
-    showNoTabs()
+    void showNothingOpen()
     return
   }
   if (activeTab >= tabs.length) activeTab = tabs.length - 1
@@ -828,6 +844,22 @@ function closeTab(i: number): void {
   renderTabs()
   persistTabs()
   void activateTab(activeTab)
+}
+
+/** Closing the last tab. In a workspace with pages that means a blank tab —
+ *  the "No pages yet" screen is a first-run explanation of what a workspace
+ *  is, and it is the wrong thing to say to someone who just closed a page. */
+async function showNothingOpen(): Promise<void> {
+  try {
+    const pages = await window.api.wsAllPages()
+    if (pages.length > 0) {
+      await newTab()
+      return
+    }
+  } catch {
+    /* fall through to the empty state */
+  }
+  showNoTabs()
 }
 
 function showNoTabs(): void {
@@ -841,6 +873,7 @@ function showNoTabs(): void {
   pdfPaneEl.hidden = true
   imagePaneEl.hidden = true
   textPaneEl.hidden = true
+  newTabPane.hide()
   welcomeEl.hidden = true
   pageLoaderEl.hidden = true
   emptyStateEl.hidden = false
@@ -848,10 +881,14 @@ function showNoTabs(): void {
 }
 
 // Open a page/PDF/file, reusing an existing tab unless asked for a new one.
-async function openRel(relIn: string, kind: string, newTab = false): Promise<void> {
+async function openRel(relIn: string, kind: string, asNewTab = false): Promise<void> {
+  if (kind === 'new') {
+    await newTab()
+    return
+  }
   const rel = await normalizeRel(relIn)
   const existing = tabIndexFor(rel)
-  if (existing >= 0 && !newTab) {
+  if (existing >= 0 && !asNewTab) {
     if (existing !== activeTab) captureScrollForShownContent()
     activeTab = existing
     renderTabs()
@@ -868,7 +905,7 @@ async function openRel(relIn: string, kind: string, newTab = false): Promise<voi
       info.icon = page.icon
     }
   }
-  if (newTab) {
+  if (asNewTab) {
     captureScrollForShownContent()
     tabs.push(info)
     activeTab = tabs.length - 1
@@ -877,6 +914,7 @@ async function openRel(relIn: string, kind: string, newTab = false): Promise<voi
   } else {
     upsertActiveTab(info)
   }
+  noteRecent({ relPath: info.relPath, kind: info.kind, title: info.title, icon: info.icon })
   await loadTabContent(info)
 }
 
@@ -907,7 +945,17 @@ async function restoreTabs(remembered?: { tabs: TabInfo[]; activeTab: number }):
   // Drop tabs whose file disappeared while the app was closed, so a stale
   // entry can't strand the window on an empty view.
   tabs = []
+  let keptBlank = false
   for (const t of candidates) {
+    // A blank tab has no file to check on. Keep at most one (its synthetic
+    // path is rewritten so two sessions can't collide on the same key), and
+    // skip the file probe entirely.
+    if (t.kind === 'new') {
+      if (keptBlank) continue
+      keptBlank = true
+      tabs.push({ relPath: blankTabRel(), kind: 'new', title: 'New tab' })
+      continue
+    }
     try {
       const kind = await window.api.fileKind(t.relPath)
       if (t.kind === 'page') {
@@ -932,73 +980,78 @@ async function restoreTabs(remembered?: { tabs: TabInfo[]; activeTab: number }):
   return true
 }
 
-let tabPickerEl: HTMLElement | null = null
-
-/** Close the new-tab page picker. Returns the element it closed, so the
- *  shared dismissal pass (Escape, a click elsewhere, scrolling) can too. */
-function closeTabPicker(): HTMLElement | null {
-  const pop = tabPickerEl
-  if (!pop) return null
-  tabPickerEl = null
-  pop.remove()
-  return pop
+// ---- blank tabs and the landing page they show ----
+// A synthetic path keeps the strip's relPath keys unique; the counter keeps
+// two blank tabs created in the same millisecond apart.
+let blankTabSeq = 0
+function blankTabRel(): string {
+  return `__newtab__:${Date.now().toString(36)}-${++blankTabSeq}`
 }
 
+/** Recently opened pages and files, newest first — what the landing page
+ *  offers under "Recent". Stored with the workspace it describes: the paths in
+ *  it only mean something inside one workspace. */
+let recentItems: NewTabItem[] = []
+const RECENT_LIMIT = 8
+function noteRecent(item: NewTabItem): void {
+  if (item.kind === 'new' || item.kind === 'binary') return
+  recentItems = [item, ...recentItems.filter((r) => r.relPath !== item.relPath)].slice(0, RECENT_LIMIT)
+  void window.api.setSettings('recentPages', { root: cacheWorkspacePath, items: recentItems })
+}
+
+const newTabPane = createNewTabPane({
+  allPages: () => window.api.wsAllPages(),
+  recent: () => recentItems,
+  open: (item) => void openRel(item.relPath, item.kind),
+  createPage: () => void createNewPage('__root__'),
+  openFile: () => {
+    void (async () => {
+      const picked = await window.api.filePick('Open a file')
+      if (picked) await openFileRef(picked.path)
+    })()
+  },
+  searchWorkspace: () => openSearch()
+})
+
+function showNewTab(): void {
+  // The page we are leaving may have edits still queued; snapshot them before
+  // the editor is swapped out from under the save queue.
+  flushSave()
+  currentPage = null
+  currentFile = null
+  currentImagePath = null
+  currentPdfPath = null
+  releasePdfViewer()
+  pageViewEl.hidden = true
+  pdfPaneEl.hidden = true
+  imagePaneEl.hidden = true
+  textPaneEl.hidden = true
+  welcomeEl.hidden = true
+  emptyStateEl.hidden = true
+  pageLoaderEl.hidden = true
+  ;(document.getElementById('crumb-bar') as HTMLElement).hidden = true
+  breadcrumbsEl.innerHTML = ''
+  markActiveInTree(null)
+  newTabPane.show()
+}
+
+/** ⌘T / the strip's "＋": a real empty tab, not a popover over the page you
+ *  were reading. Going back to an existing blank tab beats stacking another. */
 async function newTab(): Promise<void> {
-  if (tabPickerEl) {
-    closeTabPicker()
+  const existing = tabs.findIndex((t) => t.kind === 'new')
+  if (existing >= 0) {
+    await activateTab(existing)
+    newTabPane.focusSearch()
     return
   }
-  const pages = await window.api.wsAllPages()
-  const pop = document.createElement('div')
-  pop.className = 'tab-picker'
-  const input = document.createElement('input')
-  input.className = 'tab-picker-input'
-  input.placeholder = 'Open a page in a new tab…'
-  const list = document.createElement('div')
-  list.className = 'tab-picker-list'
-  pop.append(input, list)
-  document.body.appendChild(pop)
-  tabPickerEl = pop
-  anchorFloat(pop, tabAddEl)
-  const rect = tabBarEl.getBoundingClientRect()
-  pop.style.left = Math.round(rect.left + 8) + 'px'
-  pop.style.top = Math.round(rect.bottom + 4) + 'px'
-  const draw = (): void => {
-    const q = input.value.trim().toLowerCase()
-    list.innerHTML = ''
-    const matches = pages.filter((p) => !q || p.title.toLowerCase().includes(q) || p.relPath.toLowerCase().includes(q)).slice(0, 40)
-    for (const p of matches) {
-      const row = document.createElement('button')
-      row.type = 'button'
-      row.className = 'tab-picker-item'
-      row.textContent = (p.icon ? p.icon + '  ' : '') + p.title
-      row.addEventListener('click', () => {
-        closeTabPicker()
-        void openRel(p.relPath, 'page', true)
-      })
-      list.appendChild(row)
-    }
-    if (matches.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'tab-picker-empty'
-      empty.textContent = 'No pages match'
-      list.appendChild(empty)
-    }
-  }
-  input.addEventListener('input', draw)
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeTabPicker()
-      return
-    }
-    if (e.key === 'Enter') {
-      const first = list.querySelector('.tab-picker-item') as HTMLElement | null
-      first?.click()
-    }
-  })
-  draw()
-  input.focus()
+  captureScrollForShownContent()
+  const tab: TabInfo = { relPath: blankTabRel(), kind: 'new', title: 'New tab' }
+  tabs.push(tab)
+  activeTab = tabs.length - 1
+  renderTabs()
+  persistTabs()
+  await loadTabContent(tab)
+  newTabPane.focusSearch()
 }
 
 // ---- built-in plaintext viewer for non-page files (.txt, .py, .dxf, …) ----
@@ -1058,6 +1111,7 @@ async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Pr
   pageViewEl.hidden = true
   pdfPaneEl.hidden = true
   imagePaneEl.hidden = true
+  newTabPane.hide()
   emptyStateEl.hidden = true
   welcomeEl.hidden = true
   pageLoaderEl.hidden = true
@@ -1158,6 +1212,7 @@ async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise
   textPaneEl.hidden = true
   imagePaneEl.hidden = true
   pageViewEl.hidden = true
+  newTabPane.hide()
   emptyStateEl.hidden = true
   pdfPaneEl.hidden = false
   breadcrumbsEl.innerHTML = ''
@@ -1247,6 +1302,7 @@ async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promi
   pdfPaneEl.hidden = true
   textPaneEl.hidden = true
   pageViewEl.hidden = true
+  newTabPane.hide()
   emptyStateEl.hidden = true
   imagePaneEl.hidden = false
   const nameEl = document.getElementById('image-name')
@@ -1967,6 +2023,7 @@ async function createNewPage(parentRel: string | null): Promise<void> {
   const parentDir = parentRel === '__root__' ? null : await ensureFolderPage()
   const page = await window.api.wsCreate({ parentRel: parentDir || null, title: 'Untitled' })
   if (page) {
+    noteRecent({ relPath: page.relPath, kind: 'page', title: page.title, icon: page.icon })
     await refreshTree()
     await openPageByRel(page.relPath)
     requestAnimationFrame(() => {
@@ -3313,7 +3370,8 @@ function renderOpenEditors(): void {
     })
     row.append(icon, label, close)
     row.addEventListener('click', () => {
-      if (splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
+      // A blank tab has no file to put in a split pane — always go to it.
+      if (tab.kind !== 'new' && splitOpen && activePane === 'right' && tab.relPath !== tabs[activeTab]?.relPath) {
         void setSplitTarget(tab.relPath, tab.kind, tab.title)
         return
       }
@@ -3400,15 +3458,23 @@ async function initWorkspace(): Promise<void> {
     // reopen, agentSessionRoot); it must follow us or it keeps pointing at the
     // folder we just left.
     void agentPanel?.setWorkspace(base)
+    // "Recent" holds workspace-relative paths, so it starts over with the
+    // workspace and is only adopted back when it belongs to this one.
+    recentItems = []
   }
   if (!base) {
     welcomeEl.hidden = false
     pageViewEl.hidden = true
     emptyStateEl.hidden = true
     pageLoaderEl.hidden = true
+    newTabPane.hide()
     return
   }
   const info = await window.api.wsGet()
+  const storedRecents = (await window.api.getSettings('recentPages')) as
+    | { root?: string; items?: NewTabItem[] }
+    | undefined
+  if (storedRecents?.root === base && Array.isArray(storedRecents.items)) recentItems = storedRecents.items
   if (info.locked && info.displayPath) {
     // Encrypted workspace that hasn't been unlocked in this run.
     pageCache.clear() // never keep decrypted pages resident once locked
@@ -3421,6 +3487,7 @@ async function initWorkspace(): Promise<void> {
     pdfPaneEl.hidden = true
     imagePaneEl.hidden = true
     textPaneEl.hidden = true
+    newTabPane.hide()
     pageLoaderEl.hidden = true
     workspaceNameEl.textContent = (info.displayPath.split('/').pop() ?? '').replace(/^\./, '').replace(/\.yestion$/, '')
     return
@@ -3841,7 +3908,7 @@ async function init(): Promise<void> {
         renderTabs()
         persistTabs()
         if (tabs[0]) await activateTab(0)
-        else showNoTabs()
+        else await showNothingOpen()
       }
     })()
   })
@@ -3858,7 +3925,6 @@ async function init(): Promise<void> {
   registerFloatCloser(() => closePageViewMenu())
   registerFloatCloser(() => closeCrumbPop())
   registerFloatCloser(() => closeEmojiPicker())
-  registerFloatCloser(() => closeTabPicker())
   registerFloatCloser(() => closePasswordGate())
   registerFloatCloser(() => settingsApi.close())
   registerFloatCloser(() => dismissEditorFloats())
