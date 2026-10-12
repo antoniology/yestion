@@ -48,6 +48,9 @@ import {
   convertLoosePage
 } from './workspace'
 import { logLine } from './log'
+// Type-only: the shape the renderer sends for a print job. Erased at compile
+// time, so the preload's contextBridge code never reaches the main bundle.
+import type { PagePrintPayload } from '../preload/index'
 import {
   startAgentSession,
   getCurrentHandle,
@@ -139,6 +142,9 @@ async function createWindow(): Promise<BrowserWindow> {
   win.on('ready-to-show', () => win.show())
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
+    // The print host is a second window; leaving it up would keep the app
+    // "running with windows" after the one you can see is gone.
+    destroyPrintHost()
   })
 
   win.webContents.setWindowOpenHandler((details) => {
@@ -258,6 +264,83 @@ const watchWorkspace = (root: string): void => {
   }
 }
 
+// -------------------------------------------------------------------------
+// Print host: a hidden window that does the printing.
+//
+// Print jobs used to run against the window on screen, which had two
+// consequences the user could see. printToPDF lays its window out in print
+// media, so every preview refresh blanked the app down to the page content
+// and back — a few times a second while typing — and Chromium paints the
+// printed page's canvas in the window's own background colour, which the main
+// window takes from the theme. Exports came out with a band of --bg in the
+// paper margins, and a dark theme printed a black page underneath the text.
+//
+// This window loads the same renderer with ?print=1 (see initPrintHost) and
+// is created white, so the paper is white — and the visible window is left
+// entirely alone.
+// -------------------------------------------------------------------------
+let printHost: BrowserWindow | null = null
+let printHostLoading: Promise<BrowserWindow> | null = null
+
+async function getPrintHost(): Promise<BrowserWindow> {
+  if (printHost && !printHost.isDestroyed()) return printHost
+  if (!printHostLoading) {
+    printHostLoading = (async (): Promise<BrowserWindow> => {
+      const win = new BrowserWindow({
+        width: 1240,
+        height: 1754,
+        show: false,
+        backgroundColor: '#ffffff',
+        webPreferences: {
+          preload: join(__dirname, '../preload/index.js'),
+          sandbox: false,
+          contextIsolation: true
+        }
+      })
+      win.on('closed', () => {
+        if (printHost === win) printHost = null
+        if (printHostLoading) printHostLoading = null
+      })
+      const loaded = new Promise<void>((resolve) => {
+        win.webContents.once('did-finish-load', () => resolve())
+      })
+      if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+        void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?print=1`)
+      } else {
+        void win.loadFile(join(__dirname, '../renderer/index.html'), { query: { print: '1' } })
+      }
+      await loaded
+      printHost = win
+      return win
+    })()
+  }
+  return printHostLoading
+}
+
+/** Hand one page to the host, wait for it to settle, and print it. */
+async function renderPagePdf(payload: PagePrintPayload): Promise<{ data: Buffer; marginIn: number }> {
+  const host = await getPrintHost()
+  const marginIn = payload.margins === 'thin' ? 0.28 : payload.margins === 'wide' ? 0.95 : 0.55
+  // executeJavaScript resolves with the promise the host returns, so this
+  // waits for the fonts, the layout and the images before printing.
+  await host.webContents.executeJavaScript(`window.__yestionPrint(${JSON.stringify(JSON.stringify(payload))})`)
+  const data = await host.webContents.printToPDF({
+    printBackground: true,
+    pageSize: 'A4',
+    scale: 1,
+    margins: { top: marginIn, bottom: marginIn, left: marginIn, right: marginIn }
+  })
+  return { data, marginIn }
+}
+
+/** Drop the hidden window (and its renderer) when the app no longer needs it. */
+function destroyPrintHost(): void {
+  const win = printHost
+  printHost = null
+  printHostLoading = null
+  if (win && !win.isDestroyed()) win.destroy()
+}
+
 function registerWorkspaceHandlers(): void {
   ipcMain.handle('ws:get', async () => {
     const vault = currentVault()
@@ -309,20 +392,8 @@ function registerWorkspaceHandlers(): void {
 
   // Same print path as the export, but returns the bytes — used by the live PDF
   // preview so what you see is the real pagination, not an approximation.
-  ipcMain.handle('page:print-pdf', async (event, payload: { margins?: 'thin' | 'medium' | 'wide' }) => {
-    const contents = event.sender
-    try {
-      await contents.executeJavaScript('document.fonts.ready.then(() => true)')
-    } catch {
-      /* fonts API unavailable — print anyway */
-    }
-    const marginIn = payload?.margins === 'thin' ? 0.28 : payload?.margins === 'wide' ? 0.95 : 0.55
-    const data = await contents.printToPDF({
-      printBackground: true,
-      pageSize: 'A4',
-      scale: 1,
-      margins: { top: marginIn, bottom: marginIn, left: marginIn, right: marginIn }
-    })
+  ipcMain.handle('page:print-pdf', async (_event, payload: PagePrintPayload) => {
+    const { data, marginIn } = await renderPagePdf(payload)
     await logPrint('preview', marginIn, data)
     return new Uint8Array(data)
   })
@@ -330,8 +401,8 @@ function registerWorkspaceHandlers(): void {
   ipcMain.handle(
     'page:export-pdf',
     async (
-      event,
-      payload: { title: string; relPath: string; margins?: 'thin' | 'medium' | 'wide' }
+      _event,
+      payload: PagePrintPayload & { relPath: string }
     ): Promise<{ path: string; pages: number } | null> => {
     const root = getWorkspace()
     if (!root) return null
@@ -350,28 +421,15 @@ function registerWorkspaceHandlers(): void {
     } else {
       filePath = process.env.YESTION_EXPORT_PATH
     }
-    // Print the live window rather than a copy of the markup in a throwaway
-    // page: there the inlined @font-face URLs (inside app.asar) don't resolve,
-    // which broke font fallback and silently dropped every CJK glyph. The
-    // renderer applies print styles that show only the page content.
-    const contents = event.sender
-    try {
-      await contents.executeJavaScript('document.fonts.ready.then(() => true)')
-    } catch {
-      /* fonts API unavailable — print anyway */
-    }
-    await new Promise((r) => setTimeout(r, 250))
+    // Print the hidden host rather than the window the user is looking at: the
+    // host is white, so the paper is white whatever theme the app is wearing,
+    // and printing it never disturbs the visible window. It runs the same
+    // renderer with the same inlined fonts (a throwaway page could not resolve
+    // the @font-face URLs inside app.asar, which dropped every CJK glyph).
     // No scale factor: printToPDF ignores the window's zoom level, so the PDF
     // always comes out at the print stylesheet's own sizes (12pt body).
     // Margins in inches, chosen in the export popover.
-    const marginIn =
-      payload.margins === 'thin' ? 0.28 : payload.margins === 'wide' ? 0.95 : 0.55
-    const data = await contents.printToPDF({
-      printBackground: true,
-      pageSize: 'A4',
-      scale: 1,
-      margins: { top: marginIn, bottom: marginIn, left: marginIn, right: marginIn }
-    })
+    const { data, marginIn } = await renderPagePdf(payload)
     await logPrint('export', marginIn, data)
     await fsp(filePath, data)
     return { path: filePath, pages: countPdfPages(data) }
@@ -1080,8 +1138,14 @@ app.on('window-all-closed', () => {
 })
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    void createWindow() as unknown
+  // Not getAllWindows(): the hidden print host is a window too, and the dock
+  // icon has to reopen the app whether or not one is still alive.
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    // Keep the reference: the menu and the export dialog both need it, and it
+    // used to be dropped here, so a reopened window's menu items went nowhere.
+    void createWindow().then((w) => {
+      mainWindow = w
+    })
   }
 })
 

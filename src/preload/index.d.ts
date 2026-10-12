@@ -16,6 +16,18 @@ export interface WorkspacePage {
   body: string
 }
 
+export interface PagePrintPayload {
+  markdown: string
+  baseDir: string | null
+  title: string
+  icon: string
+  showTitle: boolean
+  showIcon: boolean
+  font: string
+  scale: number
+  margins?: 'thin' | 'medium' | 'wide'
+}
+
 export interface AgentSettings {
   provider: string
   model: string
@@ -89,12 +101,8 @@ export interface Api {
   providersOllama: (baseUrl: string) => Promise<{ ok: boolean; models: string[]; message: string }>
   providersTestDraft: (draft: { baseUrl: string; api: string; key: string; modelId: string }) =>
     Promise<{ ok: boolean; message: string }>
-  printPagePdf: (payload: { margins?: 'thin' | 'medium' | 'wide' }) => Promise<Uint8Array>
-  exportPagePdf: (payload: {
-    title: string
-    relPath: string
-    margins?: 'thin' | 'medium' | 'wide'
-  }) => Promise<{ path: string; pages: number } | null>
+  printPagePdf: (payload: PagePrintPayload) => Promise<Uint8Array>
+  exportPagePdf: (payload: PagePrintPayload & { relPath: string }) => Promise<{ path: string; pages: number } | null>
   wsCreateWorkspace: (payload: { name: string; parentDir: string; private?: boolean; password?: string }) => Promise<string>
   wsConvertWorkspace: (payload: { root: string; name?: string }) => Promise<string>
   wsOpenWorkspace: () => Promise<{ ok: boolean; path?: string; name?: string; canceled?: boolean; error?: string }>

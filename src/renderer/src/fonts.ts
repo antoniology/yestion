@@ -185,6 +185,36 @@ export const RENDER_FONTS: RenderFont[] = [
   }
 ]
 
+/**
+ * Families a PDF cannot carry.
+ *
+ * Chromium refuses to embed Apple's system faces (their licence forbids it), so
+ * a stack that *leads* with one prints its text with no embedded font at all —
+ * the file just names a font it never ships. Every reader then substitutes its
+ * own, which is why the default reading font came out as Helvetica: the PDF was
+ * the only place the name "San Francisco" had no meaning, and Preview fell
+ * through to whatever it had.
+ *
+ * Naming an embeddable family in their place gives the export a real font.
+ */
+const UNPRINTABLE_FAMILY =
+  /^(-apple-system|blinkmacsystemfont|system-ui|ui-[a-z]+|sf ?pro( ?text| ?display)?|sf ?mono|sfmono-regular|pingfang( ?(sc|hk|tc))?|-webkit-[a-z-]+)$/i
+
+/**
+ * The families in a reading-font stack that a print job can actually use,
+ * generic last. A stack made only of system faces has nothing left, so it
+ * falls back to the closest face macOS will let Chromium embed.
+ */
+export function printableStack(family: string, fallback = "'Helvetica Neue', Helvetica, Arial"): string {
+  const generic = (family.match(/,\s*(sans-serif|serif|monospace)\s*$/i)?.[1] ?? '').toLowerCase()
+  const families = family
+    .replace(/,\s*(sans-serif|serif|monospace)\s*$/i, '')
+    .split(',')
+    .map((f) => f.trim())
+    .filter((f) => f && !UNPRINTABLE_FAMILY.test(f.replace(/^['"]|['"]$/g, '')))
+  return `${families.length ? families.join(', ') : fallback}${generic ? `, ${generic}` : ''}`
+}
+
 /** Older ids kept working: the value sitting in settings.json resolves here. */
 const FONT_ALIASES: Record<string, string> = {
   serif: 'georgia', // "Font: Serif" was Georgia

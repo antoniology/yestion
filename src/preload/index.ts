@@ -18,6 +18,23 @@ export interface WorkspacePage {
   body: string
 }
 
+/**
+ * One page, flattened so the hidden print host can render it without a
+ * workspace of its own. Everything the print stylesheet reads travels with the
+ * page: the paper has to look the same whatever the exporting window was doing.
+ */
+export interface PagePrintPayload {
+  markdown: string
+  baseDir: string | null
+  title: string
+  icon: string
+  showTitle: boolean
+  showIcon: boolean
+  font: string
+  scale: number
+  margins?: 'thin' | 'medium' | 'wide'
+}
+
 const api = {
   wsList: (): Promise<
     { path: string; name: string; kind: 'plain' | 'private'; missing: boolean; unlocked: boolean }[]
@@ -74,13 +91,9 @@ const api = {
     ipcRenderer.invoke('providers:ollama', baseUrl),
   providersTestDraft: (draft: { baseUrl: string; api: string; key: string; modelId: string }): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke('providers:testDraft', draft),
-  printPagePdf: (payload: { margins?: 'thin' | 'medium' | 'wide' }): Promise<Uint8Array> =>
+  printPagePdf: (payload: PagePrintPayload): Promise<Uint8Array> =>
     ipcRenderer.invoke('page:print-pdf', payload),
-  exportPagePdf: (payload: {
-    title: string
-    relPath: string
-    margins?: 'thin' | 'medium' | 'wide'
-  }): Promise<{ path: string; pages: number } | null> =>
+  exportPagePdf: (payload: PagePrintPayload & { relPath: string }): Promise<{ path: string; pages: number } | null> =>
     ipcRenderer.invoke('page:export-pdf', payload),
   wsCreateWorkspace: (payload: { name: string; parentDir: string; private?: boolean; password?: string }): Promise<string> => ipcRenderer.invoke('ws:create-workspace', payload),
   wsConvertWorkspace: (payload: { root: string; name?: string }): Promise<string> => ipcRenderer.invoke('ws:convert', payload),

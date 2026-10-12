@@ -1,7 +1,7 @@
 import { createRichEditor, dismissEditorFloats, localFileUrl, type RichEditor, type YestionPageOpts } from './wysiwyg'
 import { createEditor, type MarkdownEditor } from './editor'
 import { applyTheme, getTheme, nextTheme, THEMES } from './themes'
-import { fillFontSelect, fontById } from './fonts'
+import { fillFontSelect, fontById, printableStack } from './fonts'
 import { setupOnboarding } from './onboarding'
 import { setupSidebar } from './sidebar'
 import { setupAgentPanel } from './agent'
@@ -305,8 +305,13 @@ const richEditorEl = document.createElement('div')
 richEditorEl.className = 'markdown-body rich-editor'
 editorMount.appendChild(richEditorEl)
 
+/** In the print host there is no open page — the one being printed supplies
+ *  its own folder so relative images resolve (see initPrintHost). */
+let printHostBaseDir: string | null = null
+
 const pageOpts: YestionPageOpts = {
-  getBaseDir: () => (currentPage ? currentPage.absolutePath.replace(/\/[^/]*$/, '') : null),
+  getBaseDir: () =>
+    printHostBaseDir ?? (currentPage ? currentPage.absolutePath.replace(/\/[^/]*$/, '') : null),
   resolvePage: async (name) => {
     const page = await window.api.wsResolveLink(name, currentPage?.dirRel ?? undefined)
     return page ? { title: page.title, icon: page.icon } : null
@@ -1547,26 +1552,27 @@ function applyPreviewFont(id: string): void {
   currentPreviewFontId = font.id
   document.documentElement.style.setProperty('--preview-font', font.family)
   void window.api.setSettings('previewFont', id)
+  // The pane is showing a PDF of the *old* font until it is asked again.
+  printPreviewToken = null
+  schedulePrintPreview(120)
 }
 
 /**
  * Font stack used for the PDF. macOS's sans-serif CJK fallback is PingFang SC,
  * and Chromium cannot embed that font in a PDF — every CJK glyph was silently
  * dropped, so Chinese/Japanese/Korean text vanished from exports while Latin
- * text stayed. Naming an embeddable CJK family before any generic fixes it.
+ * text stayed. Naming an embeddable CJK family before any generic fixes it, and
+ * printableStack() does the same job below for the Latin faces (a stack led by
+ * San Francisco ships no font at all, so the reader substitutes its own).
  */
-function updatePrintFont(): void {
+function printFontStack(): string {
   const font = fontById(currentPreviewFontId)
-  const withoutGeneric = font.family.replace(/,\s*(sans-serif|serif|monospace)\s*$/i, '')
-  // PingFang is the macOS sans fallback for CJK and Chromium cannot embed that
-  // .ttc in a PDF — naming it (directly or as a fallback) silently dropped every
-  // CJK glyph from exports. Drop it here; the embeddable families below cover
-  // Chinese/Japanese/Korean instead.
-  const printable = withoutGeneric.replace(/'PingFang[^']*'|PingFang\s+[A-Z]{2}(?=,|$)/gi, '')
-  document.documentElement.style.setProperty(
-    '--print-font',
-    `${printable}, 'Arial Unicode MS', 'Songti SC', 'Heiti SC', 'Hiragino Sans GB', serif`
-  )
+  return `${printableStack(font.family)}, 'Arial Unicode MS', 'Songti SC', 'Heiti SC', 'Hiragino Sans GB', serif`
+}
+
+/** The type scale the print stylesheet multiplies by (Size: S/M/L…). */
+function renderScale(): number {
+  return Number(document.documentElement.style.getPropertyValue('--render-font-scale')) || 1
 }
 
 // ---- icon picker ----
@@ -1694,21 +1700,21 @@ pageIconEl.addEventListener('click', () => {
 
 // Export options: margins + whether the page title/icon are printed. They live
 // in the popover next to the PDF button and are remembered between runs.
+//
+// The margin buttons and the title/icon switches appear in both that popover and
+// the page Display menu, so there is one value behind each of them: the two
+// menus are two doors to the same three settings, and both show what the paper
+// will do. (The title/icon pair used to be two independent settings — flipping
+// Display's "Show title" left the PDF alone, which read as the paper ignoring
+// the Display menu.)
 type ExportMargin = 'thin' | 'medium' | 'wide'
 let exportMargin: ExportMargin = 'medium'
-let exportIncludeTitle = true
-let exportIncludeIcon = true
 
 function applyExportMenuState(): void {
-  // Margin buttons live both in the export popover and in the page Display
-  // menu; keep every copy in sync.
   for (const btn of document.querySelectorAll<HTMLButtonElement>('.export-seg-btn[data-margin]')) {
     btn.classList.toggle('on', btn.dataset.margin === exportMargin)
   }
-  const titleBox = document.getElementById('export-title') as HTMLInputElement | null
-  const iconBox = document.getElementById('export-icon') as HTMLInputElement | null
-  if (titleBox) titleBox.checked = exportIncludeTitle
-  if (iconBox) iconBox.checked = exportIncludeIcon
+  syncDisplayChecks()
 }
 
 function closeExportMenu(): HTMLElement | null {
@@ -1733,27 +1739,18 @@ function toggleExportMenu(): void {
 async function exportPageToPdf(): Promise<void> {
   if (!currentPage) return
   closeExportMenu()
-  // Print options are read by the print stylesheet from <html>.
-  document.documentElement.dataset.printTitle = exportIncludeTitle ? 'on' : 'off'
-  document.documentElement.dataset.printIcon = exportIncludeIcon ? 'on' : 'off'
-  // The PDF is produced by printing this window (see the main process), so make
-  // sure the rich editor shows the latest text even if the user is in
-  // source/split mode, and let print CSS hide the app chrome.
-  const body = getActiveBody()
-  programmatic = true
-  try {
-    richEditor.setContent(body)
-  } finally {
-    programmatic = false
-  }
-  updatePrintFont()
-  document.body.classList.add('exporting-page')
+  // The display options travel in the payload; the hidden print host does the
+  // rendering, so nothing in this window has to be rearranged first. It used to
+  // be put into print styles and back, which the user saw as the whole app
+  // redrawing itself.
   setSaveStatus('Exporting PDF…', 'pending')
   try {
     const res = await window.api.exportPagePdf({
+      ...printPayload(getActiveBody()),
+      // The title is also the file name, so the payload always carries it even
+      // when the paper itself is set not to show one.
       title: currentPage.title,
-      relPath: currentPage.relPath,
-      margins: exportMargin
+      relPath: currentPage.relPath
     })
     if (res?.path) {
       setSaveStatus(`PDF saved · ${res.pages} page${res.pages === 1 ? '' : 's'}`, 'ok')
@@ -1764,8 +1761,6 @@ async function exportPageToPdf(): Promise<void> {
   } catch (err) {
     setSaveStatus('PDF export failed', 'error')
     console.error(err)
-  } finally {
-    document.body.classList.remove('exporting-page')
   }
   window.setTimeout(() => setSaveStatus(''), 4000)
 }
@@ -2325,21 +2320,90 @@ window.addEventListener('unhandledrejection', (e) => {
 //
 // The old "paged" view drew rules at computed offsets, which was only ever an
 // estimate: the print layout differs subtly (widows/orphans, break-avoid on
-// images/tables/headings, exact margins). This instead prints the live window
-// through the real print pipeline and shows the resulting pages with pdf.js, so
-// the breaks are the ones the export will actually produce. The editor stays in
+// images/tables/headings, exact margins). This instead prints the page through
+// the real print pipeline and shows the resulting pages with pdf.js, so the
+// breaks are the ones the export will actually produce. The editor stays in
 // the left pane and the preview refreshes as you type.
+//
+// The printing itself happens in a hidden second window (see initPrintHost), so
+// a refresh never touches this one — it used to run printToPDF against the
+// window you were looking at, which laid the whole app out in print media and
+// back again several times a second while typing.
 // ---------------------------------------------------------------------------
 let printPreviewOn = false
 let printPreviewTimer: number | null = null
 let printPreviewBusy = false
+/** When the in-flight render started, so a wedged one can be taken over. */
+let printPreviewBusySince = 0
 let printPreviewAgain = false
 /** Page + margin + body that the pane is currently showing (see refreshPrintPreview). */
 let printPreviewToken: string | null = null
 
-// What the page shows while writing: the title and icon can be hidden.
+// What the page shows while writing, and what the paper shows on export: the
+// title and icon can be hidden. The export popover's "Include title/icon" and
+// the Display menu's "Show title/icon" are this pair — see syncDisplayChecks.
 let showPageTitle = true
 let showPageIcon = true
+
+/** Both menus carry a copy of the title/icon switches; point them at the truth. */
+function syncDisplayChecks(): void {
+  const boxes: [string, boolean][] = [
+    ['export-title', showPageTitle],
+    ['pv-title', showPageTitle],
+    ['export-icon', showPageIcon],
+    ['pv-icon', showPageIcon]
+  ]
+  for (const [id, on] of boxes) {
+    const box = document.getElementById(id) as HTMLInputElement | null
+    if (box) box.checked = on
+  }
+}
+
+/** One page, flattened for the print host to render. */
+interface PrintPayload {
+  markdown: string
+  /** Absolute folder the page lives in, so its images resolve in the host. */
+  baseDir: string | null
+  title: string
+  icon: string
+  showTitle: boolean
+  showIcon: boolean
+  font: string
+  scale: number
+  margins: ExportMargin
+}
+
+function printPayload(markdown: string): PrintPayload {
+  return {
+    markdown,
+    baseDir: currentPage ? currentPage.absolutePath.replace(/\/[^/]*$/, '') : null,
+    title: currentPage?.title ?? '',
+    icon: currentPage?.icon ?? '',
+    showTitle: showPageTitle,
+    showIcon: showPageIcon,
+    font: printFontStack(),
+    scale: renderScale(),
+    margins: exportMargin
+  }
+}
+
+/**
+ * Everything that changes what the pane would draw — so an identical refresh
+ * can be skipped. The font and the type size belong in here: they are read by
+ * the print stylesheet, and leaving them out is why picking a different reading
+ * font or size left the old one on screen.
+ */
+function printToken(): string {
+  return [
+    currentPage?.relPath ?? '',
+    exportMargin,
+    currentPreviewFontId,
+    String(renderScale()),
+    showPageTitle ? '1' : '0',
+    showPageIcon ? '1' : '0',
+    getActiveBody()
+  ].join('\u0000')
+}
 
 function applyPageDisplay(): void {
   const view = document.getElementById('page-view')
@@ -2347,10 +2411,7 @@ function applyPageDisplay(): void {
   view.classList.toggle('hide-title', !showPageTitle)
   view.classList.toggle('hide-icon', !showPageIcon)
   view.classList.toggle('no-header', !showPageTitle && !showPageIcon)
-  const titleBox = document.getElementById('pv-title') as HTMLInputElement | null
-  const iconBox = document.getElementById('pv-icon') as HTMLInputElement | null
-  if (titleBox) titleBox.checked = showPageTitle
-  if (iconBox) iconBox.checked = showPageIcon
+  syncDisplayChecks()
   schedulePrintPreview(250)
 }
 
@@ -2368,33 +2429,39 @@ async function refreshPrintPreview(force = false): Promise<void> {
   if (splitRightEl.hidden) return
   // printToPDF + a pdf.js render is by far the most expensive thing the editor
   // does, and it used to run on every 700 ms typing pause even when nothing had
-  // changed since the last render. Content, page and margin together identify
-  // exactly what is on screen; anything else is a no-op.
-  const token = `${currentPage.relPath}\u0000${exportMargin}\u0000${getActiveBody()}`
+  // changed since the last render. printToken() says exactly what is on screen;
+  // anything else is a no-op.
+  const token = printToken()
   if (!force && token === printPreviewToken) return
   if (printPreviewBusy) {
-    printPreviewAgain = true
-    return
+    // A render that never settles must not disable the preview for the rest of
+    // the session (this used to happen for good: an occluded window fires no
+    // frames, so the wait before the render never resolved and every later
+    // refresh was swallowed here). After this long, take the pane over.
+    if (Date.now() - printPreviewBusySince < 20000) {
+      printPreviewAgain = true
+      return
+    }
+    logLine('warn', 'print preview: previous render never finished, retrying')
   }
   printPreviewBusy = true
+  printPreviewBusySince = Date.now()
   const scrollTop = splitBodyEl.scrollTop
   try {
-    // Drop the previous render FIRST. A live pdf.js viewer keeps a worker
-    // painting canvases, and Chromium's printToPDF fails when the page is busy
-    // like that — which is why the first render worked and every refresh after
-    // it did not.
+    // Drop the previous render first: two live pdf.js viewers in one pane fight
+    // over the canvas.
     splitPdfHandle?.destroy()
     splitPdfHandle = null
     clearSplitBody()
     splitBodyEl.classList.add('print-preview')
-    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
-    const bytes = await window.api.printPagePdf({ margins: exportMargin })
-    if (!printPreviewOn) return
-    // printToPDF switches the window to print media and back. Creating the
-    // viewer in that window measured a zero-width container, so the pages came
-    // out unsized. Wait for the media to revert (and the layout to settle)
-    // before building it.
-    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    // The pane's own width decides the page size, so let the cleared layout
+    // settle. nextPaint() rather than a bare rAF: these waits used to run
+    // against the window being printed, and a hidden or fully-occluded window
+    // never fires a frame — which stalled this function mid-await and left
+    // printPreviewBusy stuck true, so the preview silently stopped updating for
+    // the rest of the session.
+    await nextPaint()
+    const bytes = await window.api.printPagePdf(printPayload(getActiveBody()))
     if (!printPreviewOn) return
     const handle = await createPdfViewer({
       container: splitBodyEl,
@@ -2486,6 +2553,81 @@ function closePrintPreview(): void {
 function togglePrintPreview(): void {
   if (printPreviewOn) closePrintPreview()
   else openPrintPreview()
+}
+
+// ---------------------------------------------------------------------------
+// Print host
+//
+// The window the PDF is actually produced in. It is created hidden, loads this
+// same renderer with ?print=1, and is handed one page at a time to lay out and
+// print — so the export and the live preview both leave the window you are
+// working in alone. Two things fall out of that:
+//
+//  - printToPDF switches its own window into print media. Against the visible
+//    window that meant the sidebar, tabs and agent panel were laid out to
+//    nothing and back on every preview refresh: the whole app redrawing itself
+//    a few times a second while you typed.
+//  - Chromium paints the printed page's canvas in the *window's* background
+//    colour, which the main window sets to the theme's --bg. Every export
+//    therefore came with a band of the theme in the paper margins — and a dark
+//    theme printed a black page. This window is created white.
+// ---------------------------------------------------------------------------
+
+/** How the main process hands a page over. Resolves once it is laid out. */
+declare global {
+  interface Window {
+    __yestionPrint?: (json: string) => Promise<void>
+  }
+}
+
+/** A frame, or a moment — whichever comes first. requestAnimationFrame can be
+ *  throttled in a window that is never shown, and the print must not wait on it
+ *  forever (or, worse, print a half-laid-out page). */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      resolve()
+    }
+    requestAnimationFrame(() => requestAnimationFrame(finish))
+    window.setTimeout(finish, 120)
+  })
+}
+
+function initPrintHost(): void {
+  // Nothing else belongs on this page — and nothing else may leak into the
+  // PDF. The page view brings the mounted editor with it.
+  document.body.replaceChildren(pageViewEl)
+  pageViewEl.hidden = false
+
+  window.__yestionPrint = async (json: string): Promise<void> => {
+    const doc = JSON.parse(json) as PrintPayload
+    const root = document.documentElement
+    root.style.setProperty('--print-font', doc.font)
+    root.style.setProperty('--render-font-scale', String(doc.scale))
+    root.dataset.printTitle = doc.showTitle ? 'on' : 'off'
+    root.dataset.printIcon = doc.showIcon ? 'on' : 'off'
+    printHostBaseDir = doc.baseDir
+    pageTitleEl.value = doc.title
+    pageIconEl.textContent = doc.icon || '📄'
+    programmatic = true
+    try {
+      richEditor.setContent(doc.markdown)
+    } finally {
+      programmatic = false
+    }
+    await document.fonts.ready
+    await nextPaint()
+    // The images are new to this window: printToPDF would leave out any that
+    // have not decoded yet, which the visible window never hit (it had been
+    // showing them all along).
+    await Promise.all(
+      Array.from(richEditorEl.querySelectorAll('img')).map((img) => img.decode().catch(() => undefined))
+    )
+    await nextPaint()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3592,12 +3734,13 @@ async function init(): Promise<void> {
   applyRenderSize(setting('renderFontSize', 'm'))
   const previewBtn = document.getElementById('page-mode-btn')
   if (previewBtn) previewBtn.textContent = 'Preview'
-  showPageTitle = setting('showPageTitle', true)
-  showPageIcon = setting('showPageIcon', true)
+  // Older builds stored the paper's title/icon switches separately
+  // (exportTitle/exportIcon); fall back to them so an existing settings file
+  // keeps the choice it was showing.
+  showPageTitle = setting('showPageTitle', setting('exportTitle', true))
+  showPageIcon = setting('showPageIcon', setting('exportIcon', true))
   applyPageDisplay()
   exportMargin = setting('exportMargin', 'medium' as ExportMargin)
-  exportIncludeTitle = setting('exportTitle', true)
-  exportIncludeIcon = setting('exportIcon', true)
   applyExportMenuState()
 
   const wsModal = document.getElementById('workspace-modal') as HTMLElement
@@ -3775,12 +3918,14 @@ async function init(): Promise<void> {
     })
   }
   ;(document.getElementById('export-title') as HTMLInputElement).addEventListener('change', (e) => {
-    exportIncludeTitle = (e.target as HTMLInputElement).checked
-    void window.api.setSettings('exportTitle', exportIncludeTitle)
+    showPageTitle = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('showPageTitle', showPageTitle)
+    applyPageDisplay()
   })
   ;(document.getElementById('export-icon') as HTMLInputElement).addEventListener('change', (e) => {
-    exportIncludeIcon = (e.target as HTMLInputElement).checked
-    void window.api.setSettings('exportIcon', exportIncludeIcon)
+    showPageIcon = (e.target as HTMLInputElement).checked
+    void window.api.setSettings('showPageIcon', showPageIcon)
+    applyPageDisplay()
   })
   document.getElementById('export-run')!.addEventListener('click', () => void exportPageToPdf())
 
@@ -3858,6 +4003,7 @@ async function init(): Promise<void> {
   sizeSelect.addEventListener('change', () => {
     applyRenderSize(sizeSelect.value)
     void window.api.setSettings('renderFontSize', sizeSelect.value)
+    printPreviewToken = null
     schedulePrintPreview(250)
   })
 
@@ -3946,4 +4092,7 @@ async function init(): Promise<void> {
   await initWorkspace()
 }
 
-void init()
+// ?print=1 is the hidden print host (see initPrintHost) — the app itself must
+// not boot there: no workspace, no watcher, no agent, nothing that writes.
+if (new URLSearchParams(location.search).get('print') === '1') initPrintHost()
+else void init()
