@@ -7,3 +7,7 @@ resources/icon.iconset
 *.log
 .DS_Store
 *.tsbuildinfo
+# Agent skills installed with `npx skills add` (see skills-lock.json for what
+# is installed). Local to this machine and regenerable, so not in history.
+.agents
+.claude
