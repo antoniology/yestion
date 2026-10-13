@@ -429,7 +429,10 @@ function registerWorkspaceHandlers(): void {
     // No scale factor: printToPDF ignores the window's zoom level, so the PDF
     // always comes out at the print stylesheet's own sizes (12pt body).
     // Margins in inches, chosen in the export popover.
-    const { data, marginIn } = await renderPagePdf(payload)
+    // The PDF's /Title is the host window's document.title, so hand it the name
+    // the file just got: the viewer then shows what the user called it, which
+    // is the page's title unless they typed something else in the save dialog.
+    const { data, marginIn } = await renderPagePdf({ ...payload, docTitle: basename(filePath, '.pdf') })
     await logPrint('export', marginIn, data)
     await fsp(filePath, data)
     return { path: filePath, pages: countPdfPages(data) }

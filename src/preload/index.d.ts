@@ -26,6 +26,8 @@ export interface PagePrintPayload {
   font: string
   scale: number
   margins?: 'thin' | 'medium' | 'wide'
+  /** What the PDF should be titled; the page title when it is not set. */
+  docTitle?: string
 }
 
 export interface AgentSettings {

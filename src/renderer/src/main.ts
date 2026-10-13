@@ -2371,6 +2371,8 @@ interface PrintPayload {
   font: string
   scale: number
   margins: ExportMargin
+  /** What to title the PDF; only an export sets it (see the main process). */
+  docTitle?: string
 }
 
 function printPayload(markdown: string): PrintPayload {
@@ -2612,6 +2614,13 @@ function initPrintHost(): void {
     printHostBaseDir = doc.baseDir
     pageTitleEl.value = doc.title
     pageIconEl.textContent = doc.icon || '📄'
+    // Chromium writes the PDF's /Title — what Preview and every other viewer
+    // show as the document's name — from document.title, and this window
+    // inherited the app's own from index.html. Every export was therefore
+    // titled "Yestion" whatever it was called on disk. An export sends the
+    // name the file was saved under; the preview, which has no file, uses the
+    // page title.
+    document.title = (doc.docTitle || doc.title).trim() || 'page'
     programmatic = true
     try {
       richEditor.setContent(doc.markdown)
