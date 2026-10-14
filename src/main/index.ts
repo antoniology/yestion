@@ -131,6 +131,12 @@ async function createWindow(): Promise<BrowserWindow> {
     minHeight: 600,
     show: false,
     title: 'Yestion',
+    // The app's own chrome is the top of the window: the traffic lights float
+    // over the sidebar (which leaves room for them) instead of a system title
+    // bar stacking a second bar above the app's own. The top strip of both
+    // columns is the drag handle — see the app-region rules in styles.css.
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: themeBackground(theme),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

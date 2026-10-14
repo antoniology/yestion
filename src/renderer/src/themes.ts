@@ -304,12 +304,26 @@ function deriveTokens(v: Record<string, string>): Record<string, string> {
   const border = v['--border'] ?? '#e0e0e0'
   const codeBg = v['--code-bg'] ?? bg
   const isDark = luminance(bg) < 0.5
+  const backdrop = isDark ? mixHex(bg, '#000000', 0.4) : mixHex(bg, '#000000', 0.055)
+  // A card in a dark theme is told apart from the backdrop it floats on by how
+  // much lighter it is, not by a 1px outline. Two of the eight themes define a
+  // panel that never clears that backdrop — Plain Black's panel *is* the
+  // backdrop, GitHub Dark's is within a few points of it — and those were the
+  // two that needed a line drawn round every card. Derive a panel that clears
+  // it instead, and the line can go: the paper is a surface you can see, or it
+  // is nothing, and nothing the theme can define is worth an outline.
+  const clear = (color: string): string => {
+    const [r1, g1, b1] = hexToRgb(color)
+    const [r2, g2, b2] = hexToRgb(backdrop)
+    const far = Math.max(Math.abs(r1 - r2), Math.abs(g1 - g2), Math.abs(b1 - b2))
+    return far >= 15 ? color : mixHex(backdrop, text, 0.06)
+  }
   return {
     '--text-2': text,
     '--muted-2': muted,
     '--muted-3': mixHex(muted, panel, 0.45),
     '--sidebar-bg': bg,
-    '--agent-bg': luminance(bg) > 0.5 ? mixHex(bg, panel, 0.5) : bg,
+    '--agent-bg': isDark ? clear(bg) : mixHex(bg, panel, 0.5),
     '--surface-elevated': panel,
     '--hover-bg': rgba(text, 0.045),
     '--active-bg': rgba(text, 0.075),
@@ -328,11 +342,26 @@ function deriveTokens(v: Record<string, string>): Record<string, string> {
     '--code-bg-elevated': codeBg,
     // Card-on-backdrop shell (the PPT redesign): panels float on a slightly
     // darker backdrop; controls sit on a soft fill inside the cards.
-    '--app-bg': isDark ? mixHex(bg, '#000000', 0.4) : mixHex(bg, '#000000', 0.055),
+    '--app-bg': backdrop,
     '--card-bg': panel,
+    // Paper and glass: every surface is one of two things. The paper holds your
+    // notes and is opaque; the glass acts on them and is the same colour at low
+    // alpha, so the chrome takes its tint from the backdrop behind it instead
+    // of being a flat fill. The hairline is what separates the two. Derived, so
+    // all eight themes get the rule with no per-theme work.
+    '--paper': isDark ? clear(panel) : panel,
+    '--glass': rgba(panel, isDark ? 0.72 : 0.78),
+    '--glass-line': rgba(text, isDark ? 0.1 : 0.08),
     '--control-bg': isDark ? mixHex(bg, panel, 0.45) : mixHex(bg, panel, 0.62),
     '--control-hover': isDark ? mixHex(bg, panel, 0.7) : mixHex(bg, panel, 0.82),
-    '--control-text': isDark ? text : mixHex(text, panel, 0.12)
+    '--control-text': isDark ? text : mixHex(text, panel, 0.12),
+    // A field's resting fill. Controls used to be told apart by a 1px outline
+    // rather than by their fill, because --control-bg is derived from the page
+    // and panel colours and in the light themes those are within a few points
+    // of each other. Deriving from the text colour instead gives a fill that is
+    // legibly a fill in every theme, so nothing needs an outline.
+    '--field-bg': rgba(text, isDark ? 0.07 : 0.045),
+    '--field-line': rgba(text, isDark ? 0.14 : 0.09)
   }
 }
 

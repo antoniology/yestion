@@ -1,3 +1,5 @@
+import { iconEl } from './icons'
+
 // Which branches the user expanded. Everything starts COLLAPSED (folders,
 // subfolders, pages with children — every level), and the set survives tree
 // re-renders so the user's choices stick while the app runs.
@@ -92,7 +94,7 @@ function nodeRow(node: SidebarNode, opts: { currentRel: string | null; onOpen: (
   const del = document.createElement('button')
   del.className = 'tree-delete'
   del.title = 'Delete folder and everything inside'
-  del.textContent = '🗑'
+  del.replaceChildren(iconEl('trash', 13))
   del.addEventListener('click', (e) => {
     e.preventDefault()
     e.stopPropagation()
@@ -130,7 +132,7 @@ function pageRow(
     const del = document.createElement('button')
     del.className = 'tree-delete'
     del.title = 'Delete page'
-    del.textContent = '🗑'
+    del.replaceChildren(iconEl('trash', 13))
     del.addEventListener('click', (e) => {
       e.stopPropagation()
       void (async () => {

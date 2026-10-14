@@ -14,6 +14,8 @@
  * (↑/↓/Enter), its own filtering, and its own entrance.
  */
 
+import { applyIcon, type IconName } from './icons'
+
 export interface NewTabItem {
   relPath: string
   kind: string
@@ -47,12 +49,12 @@ export interface NewTabPane {
   focusSearch: () => void
 }
 
-const ICON_FOR_KIND: Record<string, string> = {
-  page: '📄',
-  pdf: '📕',
-  image: '🖼',
-  file: '📄',
-  binary: '📦'
+const ICON_FOR_KIND: Record<string, IconName> = {
+  page: 'doc',
+  pdf: 'doc',
+  image: 'image',
+  file: 'doc',
+  binary: 'doc'
 }
 
 const MAX_ROWS = 40
@@ -81,7 +83,7 @@ export function createNewTabPane(deps: NewTabDeps): NewTabPane {
    *  skipped entirely. */
   let drawnSignature = ''
 
-  const iconFor = (item: NewTabItem): string => item.icon || ICON_FOR_KIND[item.kind] || '📄'
+  const iconFor = (item: NewTabItem): IconName => ICON_FOR_KIND[item.kind] ?? 'doc'
 
   /** Pages are shown without the /index.md they live in. */
   const pathFor = (item: NewTabItem): string =>
@@ -139,7 +141,7 @@ export function createNewTabPane(deps: NewTabDeps): NewTabPane {
       row.style.setProperty('--i', String(Math.min(i, 12)))
       const icon = document.createElement('span')
       icon.className = 'newtab-row-icon'
-      icon.textContent = iconFor(item)
+      applyIcon(icon, item.icon, iconFor(item), 15)
       const text = document.createElement('span')
       text.className = 'newtab-row-text'
       const title = document.createElement('span')

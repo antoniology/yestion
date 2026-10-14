@@ -1,5 +1,20 @@
 import { renderAgentMarkdown } from './agent-markdown'
 import { anchorFloat } from './floats'
+import { iconEl, iconSvg, type IconName } from './icons'
+
+/**
+ * The agent's mark, in place of the ✨ it used to wear on every message. Same
+ * slot, same 24px circle — line art that inherits the panel's colour instead of
+ * a colour emoji repeated down the whole conversation.
+ */
+function agentAvatarEl(): HTMLDivElement {
+  const a = document.createElement('div')
+  a.className = 'agent-avatar'
+  a.replaceChildren(iconEl('sparkle', 12))
+  return a
+}
+
+const AGENT_AVATAR_HTML = '<div class="agent-avatar">' + iconSvg('sparkle', 12) + '</div>'
 
 export interface AgentPanelOpts {
   getContext?: () => { title: string; relPath: string } | null
@@ -248,12 +263,9 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     if (hint) hint.remove()
     const wrap = document.createElement('div')
     wrap.className = 'agent-row agent-row-assistant'
-    const avatar = document.createElement('div')
-    avatar.className = 'agent-avatar'
-    avatar.textContent = '✨'
     const content = document.createElement('div')
     content.className = 'agent-turn'
-    wrap.append(avatar, content)
+    wrap.append(agentAvatarEl(), content)
     messagesEl.appendChild(wrap)
     turnContentEl = content
     return content
@@ -436,7 +448,8 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       typingEl = document.createElement('div')
       typingEl.className = 'agent-row agent-row-assistant'
       typingEl.innerHTML =
-        '<div class="agent-avatar">✨</div><div class="agent-msg agent-msg-assistant agent-typing"><span></span><span></span><span></span></div>'
+        AGENT_AVATAR_HTML +
+        '<div class="agent-msg agent-msg-assistant agent-typing"><span></span><span></span><span></span></div>'
       messagesEl.appendChild(typingEl)
       messagesEl.scrollTop = messagesEl.scrollHeight
     } else if (!on && typingEl) {
@@ -549,13 +562,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       msg.items = [{ kind: 'text', text }]
       const wrap = document.createElement('div')
       wrap.className = 'agent-row agent-row-assistant'
-      const avatar = document.createElement('div')
-      avatar.className = 'agent-avatar'
-      avatar.textContent = '✨'
       const content = document.createElement('div')
       content.className = 'agent-turn'
       renderTurnInto(content, msg.items)
-      wrap.append(avatar, content)
+      wrap.append(agentAvatarEl(), content)
       messagesEl.appendChild(wrap)
       messagesEl.scrollTop = messagesEl.scrollHeight
       return content
@@ -572,20 +582,20 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     const wrap = document.createElement('div')
     wrap.className = 'agent-empty-wrap'
     wrap.innerHTML = `
-      <div class="agent-empty-icon">✨</div>
+      <div class="agent-empty-icon">${iconSvg('sparkle', 28, 1.5)}</div>
       <div class="agent-empty-sub">Runs pi inside this workspace — it can read, draft and edit your pages.</div>
       <div class="agent-suggestions"></div>`
     const chips = wrap.querySelector('.agent-suggestions') as HTMLElement
-    const suggestions = [
-      ['📝', 'Summarize this page'],
-      ['🃏', 'Make flashcards'],
-      ['📚', 'Draft revision notes'],
-      ['❓', 'Quiz me on this page']
+    const suggestions: [IconName, string][] = [
+      ['list', 'Summarize this page'],
+      ['table', 'Make flashcards'],
+      ['book', 'Draft revision notes'],
+      ['help', 'Quiz me on this page']
     ]
-    for (const [icon, s] of suggestions) {
+    for (const [ico, s] of suggestions) {
       const chip = document.createElement('button')
       chip.className = 'agent-chip'
-      chip.textContent = icon + ' ' + s
+      chip.append(iconEl(ico, 13), document.createTextNode(s))
       chip.addEventListener('click', () => {
         input.value = s
         void send()
@@ -951,18 +961,15 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       } else if (msg.items && msg.items.length > 0) {
         const wrap = document.createElement('div')
         wrap.className = 'agent-row agent-row-assistant'
-        const avatar = document.createElement('div')
-        avatar.className = 'agent-avatar'
-        avatar.textContent = '✨'
         const content = document.createElement('div')
         content.className = 'agent-turn'
         renderTurnInto(content, msg.items)
-        wrap.append(avatar, content)
+        wrap.append(agentAvatarEl(), content)
         messagesEl.appendChild(wrap)
       } else if (msg.text) {
         const wrap = document.createElement('div')
         wrap.className = 'agent-row agent-row-assistant'
-        wrap.innerHTML = '<div class="agent-avatar">✨</div>'
+        wrap.innerHTML = AGENT_AVATAR_HTML
         const content = document.createElement('div')
         content.className = 'agent-turn'
         const el = document.createElement('div')
@@ -1394,7 +1401,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   const sendBtn = document.querySelector('.agent-send') as HTMLButtonElement
   function setRunning(on: boolean): void {
     running = on
-    sendBtn.textContent = on ? '■' : '↑'
+    sendBtn.replaceChildren(iconEl(on ? 'stop' : 'arrowUp', 14, 2.2))
     sendBtn.title = on ? 'Stop generating' : 'Send'
     sendBtn.classList.toggle('is-stop', on)
     stopBtn.disabled = !on

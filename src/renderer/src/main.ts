@@ -7,6 +7,7 @@ import { setupSidebar } from './sidebar'
 import { setupAgentPanel } from './agent'
 import { setupSettings } from './settings'
 import { EMOJI_LIST, EMOJI_GROUPS } from './emoji-data'
+import { applyIcon, iconEl, iconSvg, type IconName } from './icons'
 import { anchorFloat, dismissFloats, installFloatDismissal, registerFloatCloser } from './floats'
 import './styles.css'
 import { createPdfViewer, type PdfViewerHandle } from './pdf-viewer'
@@ -40,6 +41,17 @@ const pageViewEl = document.getElementById('page-view') as HTMLElement
 const pageLoaderEl = document.getElementById('page-loader') as HTMLElement
 const breadcrumbsEl = document.getElementById('breadcrumbs') as HTMLElement
 const pageIconEl = document.getElementById('page-icon') as HTMLButtonElement
+
+/**
+ * The icon at the top of the document. An emoji the user picked stays an
+ * emoji — it is their page, and the icon picker is right there. A page with no
+ * icon gets the line-art sheet instead of the app's old hardcoded 📄, which
+ * read as a default rather than as "no icon set".
+ */
+function paintPageIcon(icon: string): void {
+  pageIconEl.classList.toggle('no-icon', !icon)
+  applyIcon(pageIconEl, icon, 'doc', 46)
+}
 const pageTitleEl = document.getElementById('page-title') as HTMLInputElement
 const editorMount = document.getElementById('editor-mount') as HTMLElement
 const codeMount = document.getElementById('code-mount') as HTMLElement
@@ -402,8 +414,7 @@ window.api.onWsExternalChange((rel) => {
       return
     }
     currentPage = { ...fresh, dirRel: dirOf(fresh.relPath) }
-    pageIconEl.textContent = fresh.icon
-    pageIconEl.classList.toggle('no-icon', !fresh.icon)
+    paintPageIcon(fresh.icon)
     pageTitleEl.value = fresh.title
     loadIntoEditors(fresh.body)
     setSaveStatus('')
@@ -465,8 +476,7 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   welcomeEl.hidden = true
   emptyStateEl.hidden = true
   pageLoaderEl.hidden = true
-  pageIconEl.textContent = page.icon
-  pageIconEl.classList.toggle('no-icon', !page.icon)
+  paintPageIcon(page.icon)
   pageTitleEl.value = page.title
   markActiveInTree(page.relPath)
   if (opts.tab !== false) upsertActiveTab({ relPath: page.relPath, kind: 'page', title: page.title, icon: page.icon })
@@ -587,14 +597,18 @@ function recordNavFromIndex(): void {
 }
 const tabBarEl = document.getElementById('tab-bar') as HTMLElement
 
-function tabIconFor(tab: TabInfo): string {
-  if (tab.kind === 'new') return '✦'
-  if (tab.icon) return tab.icon
-  if (tab.kind === 'pdf') return '📕'
-  if (tab.kind === 'image') return '🖼'
-  if (tab.kind === 'file') return fileIconFor(tab.relPath)
-  if (tab.kind === 'binary') return '📦'
-  return '📄'
+/** The tab strip's icon: the page's own emoji if the user set one, else line art. */
+function tabIconName(tab: TabInfo): IconName {
+  if (tab.kind === 'new') return 'sparkle'
+  if (tab.kind === 'pdf') return 'doc'
+  if (tab.kind === 'image') return 'image'
+  if (tab.kind === 'file') return fileIconName(tab.relPath)
+  if (tab.kind === 'binary') return 'doc'
+  return 'doc'
+}
+
+function paintTabIcon(el: HTMLElement, tab: TabInfo): void {
+  applyIcon(el, tab.kind === 'new' ? null : tab.icon, tabIconName(tab), 13)
 }
 
 function persistTabs(): void {
@@ -701,7 +715,7 @@ function renderTabs(): void {
       (tab.relPath === activeRel ? ' active' : '') +
       (otherRel && tab.relPath === otherRel ? ' in-split' : '')
     el.title = tab.relPath
-    ;(el.querySelector('.tab-icon') as HTMLElement).textContent = tabIconFor(tab)
+    paintTabIcon(el.querySelector('.tab-icon') as HTMLElement, tab)
     ;(el.querySelector('.tab-label') as HTMLElement).textContent = tab.title
     tabBarEl.appendChild(el) // re-appending moves the node into place (order = tabs)
   }
@@ -1078,13 +1092,13 @@ function setFileStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): v
   textStatusEl.classList.toggle('error', kind === 'error')
 }
 
-function fileIconFor(relPath: string): string {
+function fileIconName(relPath: string): IconName {
   const ext = (relPath.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase()
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'].includes(ext)) return '🖼'
-  if (['py', 'js', 'ts', 'tsx', 'jsx', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh', 'lua', 'php', 'sql'].includes(ext)) return '⌨️'
-  if (['json', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'csv', 'tsv'].includes(ext)) return '🧾'
-  if (['dxf', 'dwg', 'stl', 'obj'].includes(ext)) return '📐'
-  return '📄'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'].includes(ext)) return 'image'
+  if (['py', 'js', 'ts', 'tsx', 'jsx', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh', 'lua', 'php', 'sql'].includes(ext)) return 'code'
+  if (['json', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'csv', 'tsv'].includes(ext)) return 'table'
+  if (['dxf', 'dwg', 'stl', 'obj'].includes(ext)) return 'ruler'
+  return 'doc'
 }
 
 async function flushTextFile(): Promise<void> {
@@ -1124,7 +1138,7 @@ async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Pr
   const name = pathOrRel.split('/').pop() ?? pathOrRel
   textNameEl.textContent = name
   textNameEl.title = res.absolutePath
-  textIconEl.textContent = fileIconFor(pathOrRel)
+  textIconEl.replaceChildren(iconEl(fileIconName(pathOrRel), 15))
   if (!textEditor) {
     textEditor = createEditor(textMountEl, '', getTheme(themeId).kind, () => {
       fileDirty = true
@@ -1223,7 +1237,7 @@ async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise
   breadcrumbsEl.innerHTML = ''
   const crumb = document.createElement('span')
   crumb.className = 'crumb'
-  crumb.textContent = '📕 ' + name
+  crumb.append(iconEl('doc', 14), document.createTextNode(name))
   breadcrumbsEl.appendChild(crumb)
 
   pdfHandle?.destroy()
@@ -1318,7 +1332,7 @@ async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promi
   breadcrumbsEl.innerHTML = ''
   const crumb = document.createElement('span')
   crumb.className = 'crumb'
-  crumb.textContent = '🖼 ' + name
+  crumb.append(iconEl('image', 14), document.createTextNode(name))
   breadcrumbsEl.appendChild(crumb)
   imageViewEl.src = 'data:' + res.mimeType + ';base64,' + res.data
   await new Promise<void>((resolve) => {
@@ -1593,8 +1607,7 @@ function closeEmojiPicker(): HTMLElement | null {
 function pickIcon(icon: string): void {
   if (currentPage) {
     currentPage.icon = icon
-    pageIconEl.textContent = icon
-    pageIconEl.classList.toggle('no-icon', !icon)
+    paintPageIcon(icon)
     scheduleSave()
     queueTreeRefresh()
   }
@@ -1618,7 +1631,7 @@ function renderEmojis(): void {
   const noneBtn = document.createElement('button')
   noneBtn.type = 'button'
   noneBtn.className = 'emoji-none-btn'
-  noneBtn.textContent = '🚫 No icon'
+  noneBtn.textContent = 'No icon'
   noneBtn.addEventListener('click', () => pickIcon(''))
   emojiGrid.appendChild(noneBtn)
   const shown = matches.slice(0, emojiShown)
@@ -1666,7 +1679,7 @@ function buildEmojiPicker(): void {
     const tab = document.createElement('button')
     tab.type = 'button'
     tab.className = 'emoji-tab' + (id === emojiTab ? ' active' : '')
-    tab.textContent = id === 'all' ? '✨ All' : (EMOJI_GROUPS.find((g) => g.id === id)?.label ?? id)
+    tab.textContent = id === 'all' ? 'All' : (EMOJI_GROUPS.find((g) => g.id === id)?.label ?? id)
     tab.addEventListener('click', () => {
       emojiTab = id
       emojiShown = 0
@@ -1809,7 +1822,7 @@ function showCrumbPop(anchor: HTMLElement, node: SidebarNodeLike): void {
       row.className = 'crumb-pop-item' + (child.relPath === highlightRel ? ' active' : '')
       const icon = document.createElement('span')
       icon.className = 'crumb-pop-icon'
-      icon.textContent = child.icon ?? (child.kind === 'pdf' ? '📕' : '')
+      applyIcon(icon, child.icon, child.kind === 'pdf' ? 'doc' : 'folder', 14)
       const label = document.createElement('span')
       label.className = 'crumb-pop-label'
       label.textContent = child.title ?? child.name
@@ -2062,7 +2075,7 @@ async function renderWsMenu(): Promise<void> {
     row.className = 'ws-menu-item' + (w.path === current ? ' current' : '')
     const icon = document.createElement('span')
     icon.className = 'ws-menu-icon'
-    icon.textContent = w.kind === 'private' ? (w.unlocked ? '🔓' : '🔒') : '🗂️'
+    icon.innerHTML = iconSvg(w.kind === 'private' ? (w.unlocked ? 'unlock' : 'lock') : 'folder', 15)
     const text = document.createElement('span')
     text.className = 'ws-menu-text'
     const name = document.createElement('span')
@@ -2114,25 +2127,26 @@ async function renderWsMenu(): Promise<void> {
   sep.className = 'ws-menu-sep'
   wsMenuEl.appendChild(sep)
 
-  const add = (label: string, fn: () => void): void => {
+  const add = (label: string, ico: IconName, fn: () => void): void => {
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'ws-menu-action'
-    b.textContent = label
+    b.innerHTML = iconSvg(ico, 15)
+    b.appendChild(document.createTextNode(label))
     b.addEventListener('click', fn)
     wsMenuEl.appendChild(b)
   }
-  add('＋ New workspace…', () => {
+  add('New workspace…', 'plus', () => {
     closeWsMenu()
     const modal = document.getElementById('workspace-modal') as HTMLElement
     modal.hidden = false
     ;(document.getElementById('create-name') as HTMLInputElement).focus()
   })
-  add('🔒 New private workspace…', () => {
+  add('New private workspace…', 'lock', () => {
     closeWsMenu()
     void openPasswordGate({ mode: 'create' })
   })
-  add('📂 Open existing folder…', () => {
+  add('Open existing folder…', 'folder', () => {
     closeWsMenu()
     void (async () => {
       const res = await window.api.wsOpenWorkspace()
@@ -2531,9 +2545,8 @@ function openPrintPreview(): void {
   splitRel = null
   splitKind = 'print'
   splitTitle = 'PDF preview'
-  splitIcon = '📄'
   splitTitleEl.textContent = splitTitle
-  splitIconEl.textContent = splitIcon
+  paintSplitIcon('print')
   clearSplitBody()
   splitBodyEl.classList.add('print-preview')
   setSplitStatus('Rendering…', 'pending')
@@ -2613,7 +2626,7 @@ function initPrintHost(): void {
     root.dataset.printIcon = doc.showIcon ? 'on' : 'off'
     printHostBaseDir = doc.baseDir
     pageTitleEl.value = doc.title
-    pageIconEl.textContent = doc.icon || '📄'
+    paintPageIcon(doc.icon)
     // Chromium writes the PDF's /Title — what Preview and every other viewer
     // show as the document's name — from document.title, and this window
     // inherited the app's own from index.html. Every export was therefore
@@ -2649,7 +2662,6 @@ let splitOpen = false
 let splitRel: string | null = null
 let splitKind = 'page'
 let splitTitle = ''
-let splitIcon = ''
 let activePane: 'left' | 'right' = 'left'
 let splitPdfHandle: PdfViewerHandle | null = null
 let splitEditor: RichEditor | null = null
@@ -2791,10 +2803,16 @@ function applySplitRatio(): void {
   contentRowEl.style.gridTemplateColumns = `minmax(0, ${splitRatio}fr) 10px minmax(0, ${1 - splitRatio}fr)`
 }
 
-function splitIconFor(kind: string): string {
-  if (kind === 'pdf') return '📕'
-  if (kind === 'image') return '🖼'
-  return '📄'
+function splitIconName(kind: string): IconName {
+  if (kind === 'split') return 'panel'
+  if (kind === 'image') return 'image'
+  if (kind === 'file' && splitRel) return fileIconName(splitRel)
+  return 'doc'
+}
+
+/** The split pane's header icon: the page's own emoji, else line art by kind. */
+function paintSplitIcon(kind: string, pageIcon?: string): void {
+  applyIcon(splitIconEl, pageIcon, splitIconName(kind), 13)
 }
 
 function setActivePane(pane: 'left' | 'right'): void {
@@ -2837,7 +2855,6 @@ function closeSplit(): void {
   splitOpen = false
   splitRel = null
   splitTitle = ''
-  splitIcon = ''
   clearSplitBody()
   splitRightEl.hidden = true
   splitResizerEl.hidden = true
@@ -2867,9 +2884,8 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
   splitRel = rel
   splitKind = kind
   splitTitle = title ?? rel.split('/').filter(Boolean).pop() ?? rel
-  splitIcon = splitIconFor(kind)
   splitTitleEl.textContent = splitTitle
-  splitIconEl.textContent = splitIcon
+  paintSplitIcon(kind)
   clearSplitBody()
   renderTabs()
 
@@ -2881,9 +2897,8 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
     splitPageTitle = page.title
     splitPageIcon = page.icon
     splitTitle = page.title
-    splitIcon = page.icon || '📄'
     splitTitleEl.textContent = splitTitle
-    splitIconEl.textContent = splitIcon
+    paintSplitIcon('page', page.icon)
     const editor = ensureSplitEditor()
     splitLoading = true
     try {
@@ -2931,7 +2946,7 @@ async function setSplitTarget(rel: string, kind: string, title?: string): Promis
 function showSplitPicker(): void {
   clearSplitBody()
   splitTitleEl.textContent = 'Split'
-  splitIconEl.textContent = '⬓'
+  paintSplitIcon('split')
 
   const wrap = document.createElement('div')
   wrap.className = 'split-picker'
@@ -2948,7 +2963,7 @@ function showSplitPicker(): void {
       row.className = 'split-picker-row'
       const icon = document.createElement('span')
       icon.className = 'split-picker-icon'
-      icon.textContent = tabIconFor(t)
+      paintTabIcon(icon, t)
       const name = document.createElement('span')
       name.className = 'split-picker-name'
       name.textContent = t.title
@@ -2990,7 +3005,7 @@ function showSplitPicker(): void {
       row.className = 'split-picker-row'
       const icon = document.createElement('span')
       icon.className = 'split-picker-icon'
-      icon.textContent = p.icon || '📄'
+      applyIcon(icon, p.icon, 'doc', 13)
       const name = document.createElement('span')
       name.className = 'split-picker-name'
       name.textContent = p.title
@@ -3281,10 +3296,11 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] as string)
 }
 
-function searchIconFor(hit: SearchHit): string {
-  if (hit.icon) return hit.icon
-  if (hit.kind === 'page') return '📄'
-  return hit.kind || '📄'
+function searchIconName(hit: SearchHit): IconName {
+  if (hit.kind === 'pdf') return 'doc'
+  if (hit.kind === 'image') return 'image'
+  if (hit.kind === 'file') return fileIconName(hit.relPath)
+  return 'doc'
 }
 
 function renderSearchResults(): void {
@@ -3306,7 +3322,7 @@ function renderSearchResults(): void {
     row.className = 'search-hit' + (i === searchActive ? ' active' : '')
     const icon = document.createElement('span')
     icon.className = 'search-hit-icon'
-    icon.textContent = searchIconFor(hit)
+    applyIcon(icon, hit.icon, searchIconName(hit), 14)
     const title = document.createElement('span')
     title.className = 'search-hit-title'
     const parent = hit.relPath.includes('/') ? hit.relPath.slice(0, hit.relPath.lastIndexOf('/')) : ''
@@ -3507,7 +3523,7 @@ function renderOpenEditors(): void {
     row.className = 'oe-row' + (i === activeTab ? ' current' : '')
     const icon = document.createElement('span')
     icon.className = 'oe-icon'
-    icon.textContent = tabIconFor(tab)
+    paintTabIcon(icon, tab)
     const label = document.createElement('span')
     label.className = 'oe-label'
     label.textContent = tab.title
@@ -3551,7 +3567,10 @@ function renderOutline(): void {
   }
   let minLevel = 9
   for (const h of headings) minLevel = Math.min(minLevel, Number(h.tagName[1]))
-  for (const h of headings) {
+  // Two levels is what fits a sidebar; anything deeper is noise when you are
+  // trying to get somewhere. Listing h1–h4 swamped the panel on a long page.
+  const shown = headings.filter((h) => Number(h.tagName[1]) <= minLevel + 1)
+  for (const h of shown) {
     const level = Number(h.tagName[1])
     const row = document.createElement('button')
     row.type = 'button'
@@ -3647,9 +3666,11 @@ async function initWorkspace(): Promise<void> {
   const display = info.displayPath ?? base
   const isPrivate = !!info.private
   const name = info.name || display.split('/').pop() || 'Yestion'
-  workspaceNameEl.textContent = isPrivate ? name + ' 🔒' : name
-  ;(document.getElementById('sidebar-ws-name') as HTMLElement).textContent = name + (isPrivate ? ' 🔒' : '')
-  wsIconEl.textContent = isPrivate ? '🔒' : '🗂️'
+  // The switcher's own icon carries the lock; the name doesn't need to repeat
+  // it as a sticker.
+  workspaceNameEl.textContent = name
+  ;(document.getElementById('sidebar-ws-name') as HTMLElement).textContent = name
+  wsIconEl.innerHTML = iconSvg(isPrivate ? 'lock' : 'folder', 16)
   lockBtn.hidden = !isPrivate
   ;(document.getElementById('workspace-switcher') as HTMLButtonElement).title = display
   // The agent can't read an encrypted workspace; make that visible instead of

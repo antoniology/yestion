@@ -17,6 +17,24 @@ import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PMNode } from 'prosemirror-model'
 import { Fragment as PMFragment } from 'prosemirror-model'
 import type { EditorView } from 'prosemirror-view'
+import { applyIcon, iconEl, iconSvg, type IconName } from './icons'
+
+// The mark an inline reference wears in front of its name. A file gets the
+// paperclip (its own line-art drawing, not the 📎 it used to wear); a page
+// gets its own emoji when it has one and the app's page outline when it
+// doesn't — an iconless page used to render with nothing there at all, which
+// is what made those references look broken next to the rest.
+function refGlyph(icon: string | null | undefined, fallback: IconName, size = 15): HTMLElement {
+  const g = document.createElement('span')
+  g.className = 'chip-glyph'
+  if (icon) {
+    g.classList.add('is-emoji')
+    g.textContent = icon
+  } else {
+    g.appendChild(iconEl(fallback, size))
+  }
+  return g
+}
 
 // Minimal structural type for the markdown-it instance handed to extension
 // parse hooks (kept loose so the two markdown-it copies in the tree can't
@@ -1317,11 +1335,14 @@ const PageLink = TipTapNode.create({
       const pageOpts = (editor as unknown as { yestion?: YestionPageOpts }).yestion
       const render = (): void => {
         const name = String(current.attrs.name ?? '')
-        chip.textContent = name
+        // Until the target resolves, the chip shows the name it was written
+        // with and nothing else — no mark, so there is no flash of the wrong
+        // one when it turns out the page has an emoji of its own.
+        chip.replaceChildren(document.createTextNode(name))
         chip.classList.add('page-link-pending')
         void (pageOpts?.resolvePage(name) ?? Promise.resolve(null)).then((info) => {
           if (info && chip.isConnected) {
-            chip.textContent = (info.icon ? info.icon + '  ' : '') + info.title
+            chip.replaceChildren(refGlyph(info.icon, 'doc', 14), document.createTextNode(info.title))
             chip.classList.remove('page-link-pending')
           }
         })
@@ -1403,7 +1424,7 @@ function openPagePicker(
   head.className = 'page-picker-head'
   const headIcon = document.createElement('span')
   headIcon.className = 'page-picker-head-icon'
-  headIcon.textContent = mode === 'create' ? '📄' : '🔗'
+  headIcon.innerHTML = iconSvg(mode === 'create' ? 'doc' : 'link', 15, 1.8)
   const headText = document.createElement('span')
   headText.textContent = mode === 'create' ? 'New page' : 'Link to page'
   head.append(headIcon, headText)
@@ -1509,7 +1530,7 @@ function openPagePicker(
       const title = document.createElement('span')
       title.className = 'page-picker-item-title'
       if (row.kind === 'page') {
-        icon.textContent = row.page.icon || '📄'
+        applyIcon(icon, row.page.icon, 'doc', 15)
         title.textContent = row.page.title
         el.append(icon, title)
         const parent = parentLabel(row.page.relPath)
@@ -1520,7 +1541,7 @@ function openPagePicker(
           el.appendChild(path)
         }
       } else {
-        icon.textContent = '＋'
+        icon.innerHTML = iconSvg('plus', 15, 1.8)
         title.textContent = `Create page “${row.name}”`
         el.append(icon, title)
       }
@@ -1647,7 +1668,7 @@ const FileLink = TipTapNode.create({
       const render = (): void => {
         const p = String(current.attrs.path ?? '')
         const name = p.split('/').pop() ?? p
-        chip.textContent = '📎 ' + name
+        chip.replaceChildren(refGlyph(null, 'paperclip', 14), document.createTextNode(name))
         chip.title = p
       }
       chip.addEventListener('click', (e) => {
@@ -2071,11 +2092,12 @@ function tableToolbarEl(): HTMLElement {
   const bar = document.createElement('div')
   bar.className = 'table-toolbar'
   bar.hidden = true
-  const btn = (label: string, title: string, run: (editor: Editor) => void): void => {
+  const btn = (label: string, title: string, run: (editor: Editor) => void, svg?: IconName): void => {
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'table-tool-btn'
-    b.textContent = label
+    if (svg) b.replaceChildren(iconEl(svg, 13))
+    else b.textContent = label
     b.title = title
     b.addEventListener('mousedown', (e) => {
       e.preventDefault()
@@ -2094,7 +2116,7 @@ function tableToolbarEl(): HTMLElement {
   bar.appendChild(sep)
   btn('– row', 'Delete row', (e) => void e.chain().focus().deleteRow().run())
   btn('– col', 'Delete column', (e) => void e.chain().focus().deleteColumn().run())
-  btn('🗑', 'Delete table', (e) => void e.chain().focus().deleteTable().run())
+  btn('', 'Delete table', (e) => void e.chain().focus().deleteTable().run(), 'trash')
   document.body.appendChild(bar)
   tableToolbar = bar
   return bar
@@ -2385,7 +2407,10 @@ function hideContextToolbars(): HTMLElement[] {
 // ---------------------------------------------------------------------------
 
 interface SlashCommand {
+  /** Short text glyph ('H1', '{ }', '—'). Most commands are their own label. */
   icon: string
+  /** Drawn instead of `icon` where a text glyph wouldn't say anything. */
+  svg?: IconName
   title: string
   keywords: string
   run: (editor: Editor) => void
@@ -2424,13 +2449,15 @@ const SLASH_COMMANDS: SlashCommand[] = [
     }
   },
   {
-    icon: '📄',
+    icon: '',
+    svg: 'doc',
     title: 'New page…',
     keywords: 'page new create subpage',
     run: (e) => openPagePicker(e, pageGetter, pageCreator, 'create', afterNewPageLink ?? undefined)
   },
   {
-    icon: '📎',
+    icon: '',
+    svg: 'paperclip',
     title: 'File link',
     keywords: 'file pdf attach link',
     run: (e) => {
@@ -2442,7 +2469,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
     }
   },
   {
-    icon: '🔗',
+    icon: '',
+    svg: 'link',
     title: 'Link to page…',
     keywords: 'page link mention wiki connect',
     run: (e) => openPagePicker(e, pageGetter, pageCreator, 'link', afterNewPageLink ?? undefined)
@@ -2618,7 +2646,8 @@ export function createRichEditor(
       item.className = 'slash-item' + (i === activeIndex ? ' active' : '')
       const icon = document.createElement('span')
       icon.className = 'slash-item-icon'
-      icon.textContent = cmd.icon
+      if (cmd.svg) icon.innerHTML = iconSvg(cmd.svg, 16, 1.7)
+      else icon.textContent = cmd.icon
       const title = document.createElement('span')
       title.className = 'slash-item-title'
       title.textContent = cmd.title
