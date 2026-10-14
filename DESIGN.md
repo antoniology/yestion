@@ -159,10 +159,15 @@ and on one material rule.
     the backdrop. `clear()` in `themes.ts` derives a panel that clears the
     backdrop — measured per channel — so the card is legible without an edge,
     and the rule is deleted rather than special-cased.
-  - In-page references are one shape: a mark and a name in a soft fill. A page
-    is an accent chip wearing its own emoji, or the file outline when it has
-    none (`[[Page]]` with no icon used to render as a bare title in a pill — a
-    sticker with nothing printed on it). A file is a neutral chip wearing a
+  - In-page references are one shape: a mark, the name, and a quiet rule under
+    the name. No fill — a reference that sits in a tinted pill reads as a button
+    pasted into the sentence, and Notion has it right: mark, name, underline.
+    The rule belongs to the name alone (`border-bottom` on a `.chip-name` span,
+    not on the chip) so it starts where the words start instead of running under
+    the mark, and it is drawn in `currentColor` at a fixed fraction so it stays
+    a shade quieter than the words in every theme. A page wears its own emoji,
+    or the file outline when it has none (`[[Page]]` with no icon used to render
+    as a bare title — a reference with nothing in front of it). A file wears a
     paperclip, redrawn as line art rather than the 📎 it used to be.
   - Deliberately kept: typographic glyphs (`✕ ↑ ↓ ⏎ ⇧ ⌘`), the theme's own
     coloured affordances (todo boxes, warning edges, drag cues), and all

@@ -36,6 +36,15 @@ function refGlyph(icon: string | null | undefined, fallback: IconName, size = 15
   return g
 }
 
+// The name, in its own box: the underline belongs to the words, so it has to
+// be a separate element from the chip the mark also lives in.
+function refName(text: string): HTMLElement {
+  const n = document.createElement('span')
+  n.className = 'chip-name'
+  n.textContent = text
+  return n
+}
+
 // Minimal structural type for the markdown-it instance handed to extension
 // parse hooks (kept loose so the two markdown-it copies in the tree can't
 // mismatch types).
@@ -1338,11 +1347,11 @@ const PageLink = TipTapNode.create({
         // Until the target resolves, the chip shows the name it was written
         // with and nothing else — no mark, so there is no flash of the wrong
         // one when it turns out the page has an emoji of its own.
-        chip.replaceChildren(document.createTextNode(name))
+        chip.replaceChildren(refName(name))
         chip.classList.add('page-link-pending')
         void (pageOpts?.resolvePage(name) ?? Promise.resolve(null)).then((info) => {
           if (info && chip.isConnected) {
-            chip.replaceChildren(refGlyph(info.icon, 'doc', 14), document.createTextNode(info.title))
+            chip.replaceChildren(refGlyph(info.icon, 'doc', 14), refName(info.title))
             chip.classList.remove('page-link-pending')
           }
         })
@@ -1668,7 +1677,7 @@ const FileLink = TipTapNode.create({
       const render = (): void => {
         const p = String(current.attrs.path ?? '')
         const name = p.split('/').pop() ?? p
-        chip.replaceChildren(refGlyph(null, 'paperclip', 14), document.createTextNode(name))
+        chip.replaceChildren(refGlyph(null, 'paperclip', 14), refName(name))
         chip.title = p
       }
       chip.addEventListener('click', (e) => {

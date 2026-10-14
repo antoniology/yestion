@@ -1822,54 +1822,38 @@ body.resizing-h {
   margin-bottom: 0;
 }
 
-/* In-page references — a page (`[[Name]]`) and a file — are one shape: a mark
-   and a name inside a soft rounded fill. The page chip is tinted with the
-   accent because it moves inside your notes; the file chip is neutral because
-   it leaves for the filesystem. What sits in front of the name is the thing
+/* In-page references — a page (`[[Name]]`) and a file — are one shape: a mark,
+   the name, and a quiet rule under the name. The fill that used to sit behind
+   them made a reference read as a button pasted into the sentence; a mark and
+   an underline is how a link has always been drawn, and it stays out of the
+   way of the prose it sits in. What sits in front of the name is the thing
    itself: a page's own emoji, the app's page outline for a page that has no
    icon, and a paperclip for a file. All of them are the one weight of line art
-   from icons.ts — the file chip's paperclip used to be a 📎, which next to
-   drawn marks read as a sticker. */
+   from icons.ts — the paperclip used to be a 📎, which next to drawn marks read
+   as a sticker.
+
+   `inline`, not `inline-flex`: a long name has to be able to wrap, and the
+   underline has to follow it across the line break. */
 
 .markdown-body .page-link-chip,
 .markdown-body .file-link-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 1px 7px 2px;
+  display: inline;
+  padding: 0 1px;
   margin: 0 1px;
-  border-radius: var(--r-xs);
+  background: transparent;
+  color: inherit;
   cursor: pointer;
-  font-size: 0.95em;
-  transition: background 80ms ease, color 80ms ease;
+  font-size: 1em;
 }
 
-.markdown-body .page-link-chip {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.markdown-body .page-link-chip:hover { background: var(--accent-soft-2); }
-
-.markdown-body .file-link-chip {
-  background: var(--code-bg);
-  color: var(--muted-2);
-}
-
-.markdown-body .file-link-chip:hover {
-  background: var(--hover-bg);
-  color: var(--text);
-}
-
-/* The mark is sized in `em` so it tracks the text it sits in, and drawn in
-   currentColor so it picks up the chip's hover with no rule of its own. */
+/* The mark, sized in `em` so it tracks the text it sits in. */
 .markdown-body .chip-glyph {
-  flex: 0 0 auto;
   display: inline-flex;
   width: 1.05em;
   height: 1.05em;
-  color: currentColor;
-  opacity: 0.9;
+  margin-right: 0.3em;
+  vertical-align: -0.18em;
+  color: var(--muted-2);
 }
 
 .markdown-body .chip-glyph .ic { width: 100%; height: 100%; }
@@ -1877,15 +1861,31 @@ body.resizing-h {
 .markdown-body .chip-glyph.is-emoji {
   width: auto;
   height: auto;
-  font-size: 1em;
-  line-height: 1.15;
-  opacity: 1;
+  font-size: 0.95em;
+  vertical-align: -0.14em;
+  color: inherit;
+}
+
+/* The rule belongs to the name and not to the chip, so it starts where the
+   name starts instead of running under the mark as well. Drawn in the text
+   colour at a fixed fraction, so it stays "a shade quieter than the words" in
+   every theme without a token per theme. */
+.markdown-body .chip-name {
+  /* A notch heavier than the sentence it sits in, so the reference reads as a
+     link and not as a word that happens to be underlined. */
+  font-weight: 500;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.markdown-body .page-link-chip:hover .chip-name,
+.markdown-body .file-link-chip:hover .chip-name {
+  border-color: color-mix(in srgb, currentColor 60%, transparent);
 }
 
 /* An unresolved `[[Page]]` says so, quietly. */
 .markdown-body .page-link-chip.page-link-pending {
   color: var(--muted);
-  background: var(--code-bg);
   font-style: italic;
 }
 
