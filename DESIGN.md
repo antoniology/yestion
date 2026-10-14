@@ -30,7 +30,7 @@ anything.
 
 ### What this replaces
 
-| Today | Why it reads as dated |
+| Before | Why it read as dated |
 | --- | --- |
 | Four rounded cards (sidebar, toolbar, page) floating on a grey backdrop, every one with `--r-xl` and `--shadow-sm` | The SaaS-card kit: one radius and one shadow for every level of hierarchy |
 | A chrome band split across a floating top strip and a separate toolbar card | Two systems doing one job |
@@ -44,12 +44,15 @@ Kept: the 8 themes and the derivation in `themes.ts`. It is the app's best
 existing system and it is not the problem — a theme swap should keep working.
 
 Added: the paper is not the same white as the tools. `--paper` sits a hair above
-`--panel-bg`, and glass never uses a flat fill.
+`--panel-bg`, and glass never uses a flat fill. In the dark themes it also has
+to *clear the backdrop* — `clear()` in `themes.ts` lifts a panel that would
+otherwise be the same colour as the surface it sits on, which is what lets the
+cards go without an edge.
 
 ```
 --paper        #ffffff   the page itself       (light theme)
---glass        rgba(255,255,255,0.72)          the chrome over it
---glass-line   rgba(0,0,0,0.07)                where glass meets paper
+--glass        rgba(255,255,255,0.78)          the chrome over it
+--field-bg     rgba(0,0,0,0.045)               a field's fill, in place of its outline
 --ink          #1c1c1b   text, one notch off black
 --ink-2        #55544f   secondary
 --ink-3        #8a8983   labels, metadata
@@ -139,6 +142,31 @@ and on one material rule.
     scrolls under the chrome, on a wrapper with no popovers in it.
   - **Outline trimmed.** Two heading levels, collapsed by default, capped at
     34vh. A twelve-row `Act * Scene *` list was taking the sidebar.
+
+- **Slice 2 — line art, no outlines.** The chrome stops wearing emoji and stops
+  drawing hairlines.
+  - `icons.ts` is now the one source of interface icons: a 24×24 grid, 1.8
+    stroke, `currentColor`. `iconSvg()` for `innerHTML` sites, `iconEl()` for
+    element sites, and `applyIcon()` for the slots where a *file's own* icon has
+    to win — the sidebar tree, the page title, the breadcrumb, the in-page page
+    reference. Everything else is line art, so nothing depends on whichever
+    emoji font the platform ships and nothing inherits an emoji's colour.
+  - **Every chrome hairline is gone.** A field is a fill (`--field-bg`,
+    `--field-line`, derived from the *text* colour so it is legible in all eight
+    themes). A popover is glass plus `--shadow-popover`. A separator is space.
+  - Dark themes were the hard case: they carried a rule drawing a 1px edge round
+    every card because two of the eight themes define a panel the same colour as
+    the backdrop. `clear()` in `themes.ts` derives a panel that clears the
+    backdrop — measured per channel — so the card is legible without an edge,
+    and the rule is deleted rather than special-cased.
+  - In-page references are one shape: a mark and a name in a soft fill. A page
+    is an accent chip wearing its own emoji, or the file outline when it has
+    none (`[[Page]]` with no icon used to render as a bare title in a pill — a
+    sticker with nothing printed on it). A file is a neutral chip wearing a
+    paperclip, redrawn as line art rather than the 📎 it used to be.
+  - Deliberately kept: typographic glyphs (`✕ ↑ ↓ ⏎ ⇧ ⌘`), the theme's own
+    coloured affordances (todo boxes, warning edges, drag cues), and all
+    document content.
 
 ### Next
 

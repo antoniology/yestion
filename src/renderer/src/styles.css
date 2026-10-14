@@ -96,13 +96,15 @@
   --r-lg: 12px;
   --r-xl: 16px;
 
-  /* Paper and glass. --paper/--glass/--glass-line are rewritten per theme in
-     themes.ts (see deriveTokens); these are what the first frame gets before a
-     theme is applied. See DESIGN.md. */
+  /* Paper and glass. These are rewritten per theme in themes.ts (see
+     deriveTokens); what's here is what the first frame gets before a theme is
+     applied. See DESIGN.md. */
   --paper: #ffffff;
   --glass: rgba(255, 255, 255, 0.78);
-  --glass-line: rgba(20, 20, 19, 0.08);
   --glass-blur: saturate(180%) blur(22px);
+  /* Fields are told apart by their fill, never by an outline: --field-bg is a
+     tint of the text colour, so it is a fill in every theme, including the two
+     dark ones whose page and panel colours are the same. */
   --field-bg: rgba(20, 20, 19, 0.045);
   --field-line: rgba(20, 20, 19, 0.09);
 

@@ -347,11 +347,12 @@ function deriveTokens(v: Record<string, string>): Record<string, string> {
     // Paper and glass: every surface is one of two things. The paper holds your
     // notes and is opaque; the glass acts on them and is the same colour at low
     // alpha, so the chrome takes its tint from the backdrop behind it instead
-    // of being a flat fill. The hairline is what separates the two. Derived, so
-    // all eight themes get the rule with no per-theme work.
+    // of being a flat fill. Nothing is drawn between them — the paper is a
+    // surface because it clears the backdrop, and a surface that needs an
+    // outline to be seen was never a surface. Derived, so all eight themes get
+    // the rule with no per-theme work.
     '--paper': isDark ? clear(panel) : panel,
     '--glass': rgba(panel, isDark ? 0.72 : 0.78),
-    '--glass-line': rgba(text, isDark ? 0.1 : 0.08),
     '--control-bg': isDark ? mixHex(bg, panel, 0.45) : mixHex(bg, panel, 0.62),
     '--control-hover': isDark ? mixHex(bg, panel, 0.7) : mixHex(bg, panel, 0.82),
     '--control-text': isDark ? text : mixHex(text, panel, 0.12),
