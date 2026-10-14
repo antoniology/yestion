@@ -1869,18 +1869,30 @@ body.resizing-h {
 /* The rule belongs to the name and not to the chip, so it starts where the
    name starts instead of running under the mark as well. Drawn in the text
    colour at a fixed fraction, so it stays "a shade quieter than the words" in
-   every theme without a token per theme. */
+   every theme without a token per theme.
+
+   `text-decoration` rather than `border-bottom`: a border sits at the bottom of
+   the inline box, below the descender, where it reads as a separate rule that
+   happens to be under some words. A decoration sits under the baseline, which
+   is where a reader expects a link's line to be, and `text-underline-offset`
+   is the room between. */
 .markdown-body .chip-name {
   /* A notch heavier than the sentence it sits in, so the reference reads as a
      link and not as a word that happens to be underlined. */
   font-weight: 500;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 28%, transparent);
-  transition: border-color var(--dur-fast) var(--ease);
+  /* A hint, not a mark: enough to say "this goes somewhere", not enough to be
+     seen while you are reading. It deepens on hover, which is when you are
+     actually looking for it. */
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 20%, transparent);
+  text-underline-offset: 2.5px;
+  transition: text-decoration-color var(--dur-fast) var(--ease);
 }
 
 .markdown-body .page-link-chip:hover .chip-name,
 .markdown-body .file-link-chip:hover .chip-name {
-  border-color: color-mix(in srgb, currentColor 60%, transparent);
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
 }
 
 /* An unresolved `[[Page]]` says so, quietly. */
