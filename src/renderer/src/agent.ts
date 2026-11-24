@@ -82,6 +82,11 @@ function toolDisplay(name: string, args: Record<string, unknown>): string {
     case 'ls':
     case 'list':
       return str(a.path) || '.'
+    // Bundled DeepSeek web tools (src/main/agent-extensions/deepseek-search.ts).
+    case 'deepseek_search':
+      return [str(a.query), Number(a.count) > 0 ? `${String(a.count)} results` : ''].filter(Boolean).join('  ·  ')
+    case 'deepseek_fetch':
+      return str(a.url)
     default: {
       const first = Object.values(a).find((v) => typeof v === 'string' && v)
       return typeof first === 'string' ? first : ''
@@ -206,6 +211,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
    * folded back into this block instead of opening another one.
    */
   let closedTurnText: { item: TextItem; el: HTMLElement } | null = null
+  /** The closed turn's container and history entry, so a late answer that had
+   *  no text at all when the turn closed still lands in the right row. */
+  let closedTurnContent: HTMLElement | null = null
+  let closedTurnMsg: ChatMsg | null = null
   /** True from the moment a turn closes until the user says something new. */
   let betweenTurns = false
   /** Deltas seen since the turn closed, to tell a replay from a live tail. */
@@ -254,6 +263,8 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     // the newest thing on screen, so late events are no longer folded into it.
     betweenTurns = false
     closedTurnText = null
+    closedTurnContent = null
+    closedTurnMsg = null
     lateDeltaBuf = ''
     lastNoticeText = ''
     const msg: ChatMsg = { role: 'assistant', items: [] }
@@ -277,6 +288,8 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     // text node stays addressable so a replayed stream can be folded into it.
     if (turnContentEl) {
       closedTurnText = liveText
+      closedTurnContent = turnContentEl
+      closedTurnMsg = currentTurn
       lateDeltaBuf = ''
       lateDropLogged = false
       betweenTurns = true
@@ -293,17 +306,58 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
    * Full-message replays either carry more than we rendered (the deltas stopped
    * early — extend in place) or are the same answer again (drop it).
    */
+  /**
+   * Where text that arrives after the turn closed belongs.
+   *
+   * A reasoning turn can finish with only thinking and tool blocks, so
+   * `liveText` was null when the turn closed and the answer itself arrives
+   * afterwards. The old fold treated that as a replay and dropped it — the
+   * turn then sat on screen with thinking and no answer. If the closed turn
+   * exists, give it a text block now.
+   */
+  function lateTextTarget(): { item: TextItem; el: HTMLElement } | null {
+    if (closedTurnText) return closedTurnText
+    if (!closedTurnContent) return null
+    const el = document.createElement('div')
+    el.className = 'agent-output markdown-body'
+    closedTurnContent.appendChild(el)
+    const item: TextItem = { kind: 'text', text: '' }
+    closedTurnMsg?.items?.push(item)
+    closedTurnText = { item, el }
+    return closedTurnText
+  }
+
+  function renderLateText(target: { item: TextItem; el: HTMLElement }): void {
+    target.el.innerHTML = renderAgentMarkdown(target.item.text)
+    messagesEl.scrollTop = messagesEl.scrollHeight
+  }
+
   function foldLateText(full: string, what: string): void {
-    const closed = closedTurnText
-    const shown = closed?.item.text ?? ''
-    if (closed && full.length > shown.length && full.startsWith(shown)) {
+    const closed = lateTextTarget()
+    if (!closed) {
+      noteLateDrop(what, full.length)
+      return
+    }
+    const shown = closed.item.text
+    // A replay of what is already on screen — the case this guard was built for.
+    if (full === shown || shown.startsWith(full) || shown.includes(full)) {
+      noteLateDrop(what, full.length)
+      return
+    }
+    // The final message carries more than the stream did: complete it in place.
+    if (full.startsWith(shown) || full.includes(shown)) {
       closed.item.text = full
-      closed.el.innerHTML = renderAgentMarkdown(full)
       lateDeltaBuf = ''
+      renderLateText(closed)
       logLine('info', `agent: late ${what} completed the closed turn (${shown.length} → ${full.length} chars)`)
       return
     }
-    noteLateDrop(what, full.length)
+    // A genuinely separate message from the same turn: append it rather than
+    // losing it. Two messages are better than no answer.
+    closed.item.text = shown ? `${shown}\n\n${full}` : full
+    lateDeltaBuf = ''
+    renderLateText(closed)
+    logLine('info', `agent: late ${what} appended to the closed turn (${full.length} chars)`)
   }
 
   /**
@@ -312,7 +366,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
    * streaming past the prompt promise (append it). The buffer tells them apart.
    */
   function appendLateDelta(delta: string): void {
-    const closed = closedTurnText
+    const closed = lateTextTarget()
     if (!closed) {
       noteLateDrop('text_delta', delta.length)
       return
@@ -325,8 +379,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     }
     lateDeltaBuf = ''
     closed.item.text += delta
-    closed.el.innerHTML = renderAgentMarkdown(closed.item.text)
-    messagesEl.scrollTop = messagesEl.scrollHeight
+    renderLateText(closed)
   }
 
   function noteLateDrop(what: string, chars: number): void {
@@ -1013,6 +1066,26 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     return v != null ? String(v) : 'tool-' + toolSeq++
   }
 
+  // A turn the main process started on its own — quiz marking sent back to the
+  // conversation that wrote the paper. The panel did not type this prompt, so
+  // it has to add the user turn itself; the reply then streams in as usual.
+  window.api.onAgentInjectedPrompt((text) => {
+    // Same order as send(): close whatever turn was on screen first, then open
+    // the user row (which clears the late-event guard).
+    endTurn()
+    addMsg('user', text)
+    showTyping(true)
+    // Hold the composer while marking runs: letting another prompt interleave
+    // would put two turns in flight and the runner could read the wrong reply.
+    setRunning(true)
+    messagesEl.scrollTop = messagesEl.scrollHeight
+  })
+  window.api.onAgentInjectedDone(() => {
+    showTyping(false)
+    setRunning(false)
+    endTurn()
+  })
+
   window.api.onAgentEvent((raw) => {
     const ev = raw as Record<string, unknown>
     const type = String(ev.type ?? '')
@@ -1082,7 +1155,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     // off while thinking" actually is.
     if (type === 'message_end' || type === 'turn_end') {
       const msg = ev.message as
-        | { content?: unknown; stopReason?: string; usage?: Record<string, unknown> }
+        | {
+            content?: unknown
+            stopReason?: string
+            errorMessage?: string
+            usage?: Record<string, unknown>
+          }
         | undefined
       const full = extractText(msg?.content)
       if (full) {
@@ -1107,7 +1185,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
       } else if (stop === 'aborted') {
         addNotice('The response was stopped before it finished.', 'warn')
       } else if (stop === 'error') {
-        addNotice('The provider ended the response with an error.', 'warn')
+        const detail = String(msg?.errorMessage ?? '').trim()
+        addNotice(
+          `The provider ended the response with an error${detail ? ` — ${detail}` : ''}. ` +
+            'Dropped connections are continued automatically; if this repeats, ask it to continue or switch models.',
+          'warn'
+        )
       } else if (type === 'turn_end' && !full && (ev.toolResults as unknown[] | undefined)?.length === 0) {
         addNotice('The model ended the turn without producing any text.', 'warn')
       }
@@ -1264,6 +1347,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   }
   modelSelect.addEventListener('change', () => {
     void (async () => {
+      // Switching models restarts the agent. If a run is in flight, end it
+      // rather than refusing the switch: a selector that silently does nothing
+      // (especially when `running` is stale after /stop) is worse than an
+      // aborted turn.
+      await window.api.agentAbort()
+      setRunning(false)
       const v = modelSelect.value
       if (!v) {
         await window.api.setSettings('agentProvider', 'anthropic')
@@ -1273,7 +1362,15 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
         await window.api.setSettings('agentProvider', provider)
         await window.api.setSettings('agentModel', rest.join('/'))
       }
+      // Restart alone only kills the live session. Re-attach immediately so the
+      // new model is actually in use (and its label updates) before the next
+      // message, instead of the first prompt paying for a lazy reload.
       await window.api.agentRestart()
+      try {
+        await attachToShown()
+      } catch (err) {
+        addMsg('assistant', 'Could not switch model: ' + String((err as Error).message ?? err))
+      }
       ctxLabel.textContent = v ? v.split('/').pop() || v : 'default'
     })()
   })
@@ -1310,7 +1407,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
     { cmd: '/compact', desc: 'Compact the context window', run: async () => { const res = await window.api.agentCompact(); const detail = typeof res === 'string' ? res : ''; addMsg('assistant', 'Context compacted.' + (detail ? ' ' + detail : '')) } },
     { cmd: '/new', desc: 'Start a fresh agent session', run: async () => { await newChat(); addMsg('assistant', 'New session started.') } },
     { cmd: '/resume', desc: 'Open a recent conversation', run: async () => { const b = document.getElementById('agent-history'); if (b) await openRecent(b as HTMLElement) } },
-    { cmd: '/stop', desc: 'Abort the current run', run: async () => { await window.api.agentAbort() } },
+    { cmd: '/stop', desc: 'Abort the current run', run: async () => { await window.api.agentAbort(); setRunning(false) } },
     { cmd: '/thinking', arg: 'off|low|medium|high|max', desc: 'Set thinking level', run: async (arg) => { const lvl = (arg || 'medium').trim(); await window.api.setSettings('agentThinking', lvl); setEffortValue(lvl); await window.api.agentThinking(lvl); addMsg('assistant', `Thinking effort: ${lvl}`) } },
     { cmd: '/model', desc: 'Open the model selector', run: () => { modelSelect.focus(); modelSelect.click() } },
     { cmd: '/help', desc: 'List available commands', run: () => { addMsg('assistant', SLASH_CMDS.map((c) => `**${c.cmd}**${c.arg ? ' ' + c.arg : ''} — ${c.desc}`).join('\n')) } }
@@ -1654,6 +1751,12 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
           throw err
         }
       }
+      // pi replays the finished message's events *after* prompt() resolves, and
+      // resolving is what closes the turn here. Keep the turn open — and the
+      // composer locked — for a beat so the tail lands in the right place. A
+      // new message sent inside this window aborts the stream, which is what
+      // looked like the answer being cut off.
+      await new Promise((resolve) => setTimeout(resolve, 450))
       setRunning(false)
       showTyping(false)
       endTurn()

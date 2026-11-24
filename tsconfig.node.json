@@ -1,6 +1,9 @@
 {
   "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
   "include": ["electron.vite.config.*", "src/main/**/*", "src/preload/**/*"],
+  // Agent extensions are inlined into the bundle as text (`?raw`) and only ever
+  // compiled by pi's own loader at runtime, against pi's module graph — not ours.
+  "exclude": ["src/main/agent-extensions/**/*"],
   "compilerOptions": {
     "composite": true,
     "types": ["electron-vite/node"]

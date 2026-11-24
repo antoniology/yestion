@@ -11,3 +11,5 @@ resources/icon.iconset
 # is installed). Local to this machine and regenerable, so not in history.
 .agents
 .claude
+.pi
+skills-lock.json

@@ -4,7 +4,7 @@ export interface WorkspaceChild {
   name: string
   path: string
   relPath: string
-  kind: 'page' | 'folder'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   children?: WorkspaceChild[]
@@ -103,6 +103,11 @@ const api = {
   wsTree: (): Promise<WorkspaceChild> => ipcRenderer.invoke('ws:tree'),
   wsConvertLoose: (relPath: string): Promise<string> => ipcRenderer.invoke('ws:convert-loose', relPath),
   wsRead: (relPath: string): Promise<WorkspacePage | null> => ipcRenderer.invoke('ws:read', relPath),
+  /** In-flight quiz answers, saved under `.yestion/attempts/`. */
+  quizAttemptLoad: (relPath: string): Promise<string | null> => ipcRenderer.invoke('quiz:attemptLoad', relPath),
+  quizAttemptSave: (relPath: string, data: string): Promise<boolean> =>
+    ipcRenderer.invoke('quiz:attemptSave', relPath, data),
+  quizAttemptClear: (relPath: string): Promise<boolean> => ipcRenderer.invoke('quiz:attemptClear', relPath),
   wsSearch: (query: string): Promise<
     { relPath: string; title: string; icon: string; kind: string; line: number; snippet: string }[]
   > => ipcRenderer.invoke('ws:search', query),
@@ -132,6 +137,22 @@ const api = {
   agentPrompt: (text: string, context?: { title: string; relPath: string } | null, images?: { data: string; mimeType: string }[]): Promise<void> => ipcRenderer.invoke('agent:prompt', text, context, images),
   agentAbort: (): Promise<void> => ipcRenderer.invoke('agent:abort'),
   agentStop: (): Promise<void> => ipcRenderer.invoke('agent:stop'),
+  agentOneshot: (req: {
+    system: string
+    prompt: string
+    timeoutMs?: number
+    thinkingLevel?: string
+  }): Promise<{ ok: boolean; text: string; error?: string; elapsedMs: number }> =>
+    ipcRenderer.invoke('agent:oneshot', req),
+  /** Marking: goes to the conversation that wrote the quiz when it is attached,
+   *  and falls back to the isolated one-shot when it is not. */
+  agentGradeQuiz: (req: {
+    relPath: string
+    system: string
+    prompt: string
+    timeoutMs?: number
+  }): Promise<{ ok: boolean; text: string; error?: string; elapsedMs: number }> =>
+    ipcRenderer.invoke('agent:gradeQuiz', req),
   agentModels: (): Promise<
     { provider: string; providerName: string; id: string; name: string; contextWindow: number }[]
   > => ipcRenderer.invoke('agent:models'),
@@ -160,6 +181,18 @@ const api = {
     const listener = (): void => callback()
     ipcRenderer.on('agent:stopped', listener)
     return () => ipcRenderer.removeListener('agent:stopped', listener)
+  },
+  /** A prompt the main process sent into this conversation on its own (quiz
+   *  marking), so the panel can show the user turn it did not type. */
+  onAgentInjectedPrompt: (callback: (text: string) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, text: string): void => callback(text)
+    ipcRenderer.on('agent:injected-prompt', listener)
+    return () => ipcRenderer.removeListener('agent:injected-prompt', listener)
+  },
+  onAgentInjectedDone: (callback: () => void): (() => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('agent:injected-done', listener)
+    return () => ipcRenderer.removeListener('agent:injected-done', listener)
   },
 
   getSettings: <K extends string>(key: K): Promise<unknown> => ipcRenderer.invoke('settings:get', key),

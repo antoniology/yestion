@@ -9,7 +9,7 @@ export interface SidebarNode {
   name: string
   relPath: string
   dirRel?: string
-  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   children?: SidebarNode[]
@@ -41,7 +41,7 @@ export function setupSidebar(
     const flat: SidebarNode[] = []
     const walk = (nodes: SidebarNode[]): void => {
       for (const n of nodes) {
-        if (n.kind === 'page' || n.kind === 'pdf' || n.kind === 'image') flat.push(n)
+        if (n.kind === 'page' || n.kind === 'pdf' || n.kind === 'image' || n.kind === 'quiz') flat.push(n)
         else if (n.children) walk(n.children)
       }
     }
@@ -77,7 +77,12 @@ export function setupSidebar(
 }
 
 function nodeRow(node: SidebarNode, opts: { currentRel: string | null; onOpen: (rel: string, kind: string, newTab?: boolean) => void }, depth: number): HTMLElement {
-  if (node.kind === 'page' || node.kind === 'pdf' || node.kind === 'image' || node.kind === 'file' || node.kind === 'binary') return pageRow(node, opts, depth)
+  // A leaf that falls through to the folder branch renders as an empty
+  // collapsible folder with no way to open it, so this list has to name every
+  // leaf kind the main process can emit.
+  if (node.kind === 'page' || node.kind === 'pdf' || node.kind === 'image' || node.kind === 'file' || node.kind === 'binary' || node.kind === 'quiz') {
+    return pageRow(node, opts, depth)
+  }
   const details = document.createElement('details')
   details.className = 'tree-folder'
   details.open = userExpanded.has(node.relPath)
@@ -128,7 +133,14 @@ function pageRow(
   label.className = 'tree-label'
   label.textContent = page.title ?? page.name
   row.append(icon, label)
-  if (page.kind === 'page' || page.kind === 'pdf' || page.kind === 'image' || page.kind === 'file' || page.kind === 'binary') {
+  if (
+    page.kind === 'page' ||
+    page.kind === 'pdf' ||
+    page.kind === 'image' ||
+    page.kind === 'file' ||
+    page.kind === 'binary' ||
+    page.kind === 'quiz'
+  ) {
     const del = document.createElement('button')
     del.className = 'tree-delete'
     del.title = 'Delete page'
@@ -159,7 +171,7 @@ function pageRow(
   ext.className = 'tree-ext'
   const m = /\.([a-z0-9]+)$/i.exec(page.relPath)
   ext.textContent = m ? '.' + m[1].toLowerCase() : ''
-  if (page.kind === 'file' || page.kind === 'binary' || page.kind === 'image') ext.classList.add('tree-ext-always')
+  if (page.kind === 'file' || page.kind === 'binary' || page.kind === 'image' || page.kind === 'quiz') ext.classList.add('tree-ext-always')
   row.appendChild(ext)
   if (page.kind === 'page' && (page.children?.length ?? 0) > 0) {
     // Page with children → collapsible branch (chevron toggles, row still opens).

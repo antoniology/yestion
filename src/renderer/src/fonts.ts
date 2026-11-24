@@ -40,6 +40,14 @@ export const RENDER_FONTS: RenderFont[] = [
   },
 
   // ---- serif ----
+  // Bundled with the app (see the @font-face rules at the top of styles.css):
+  // the actual face Knuth set TeX in, for a paper-like page.
+  {
+    id: 'computerModern',
+    label: 'Computer Modern (LaTeX)',
+    group: 'Serif',
+    family: "'CMU Serif', 'Latin Modern Roman', 'Times New Roman', 'Songti SC', STSong, serif"
+  },
   { id: 'times', label: 'Times New Roman', group: 'Serif', family: "'Times New Roman', Times, serif" },
   // The app's long-standing default serif.
   { id: 'georgia', label: 'Georgia', group: 'Serif', family: "Georgia, 'Times New Roman', Times, serif" },

@@ -54,7 +54,8 @@ const ICON_FOR_KIND: Record<string, IconName> = {
   pdf: 'doc',
   image: 'image',
   file: 'doc',
-  binary: 'doc'
+  binary: 'doc',
+  quiz: 'quiz'
 }
 
 const MAX_ROWS = 40

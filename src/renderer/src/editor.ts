@@ -1,5 +1,5 @@
 import { EditorView } from '@codemirror/view'
-import { EditorState, Compartment, Transaction } from '@codemirror/state'
+import { EditorState, Compartment, Transaction, Annotation } from '@codemirror/state'
 import { markdown } from '@codemirror/lang-markdown'
 import { syntaxHighlighting, HighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
@@ -82,6 +82,11 @@ function themeExtension(kind: 'light' | 'dark'): ReturnType<typeof EditorView.th
   )
 }
 
+/** Marks a write the app made on the user's behalf (rich⇄source sync). The
+ *  selection it leaves behind is not a selection the user made, so the count
+ *  listener must not report it. */
+const externalWrite = Annotation.define<boolean>()
+
 export interface MarkdownEditor {
   view: EditorView
   getContent: () => string
@@ -94,7 +99,14 @@ export function createEditor(
   parent: HTMLElement,
   initialContent: string,
   kind: 'light' | 'dark',
-  onChange: (text: string) => void
+  onChange: (text: string) => void,
+  /**
+   * Text and selected slice after any change, for the word count. Separate from
+   * `onChange` because the selection moves without the document changing, and a
+   * count that only refreshed on typing would go stale the moment you selected a
+   * paragraph.
+   */
+  onState?: (text: string, selected: string) => void
 ): MarkdownEditor {
   const themeCompartment = new Compartment()
 
@@ -111,6 +123,12 @@ export function createEditor(
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onChange(update.state.doc.toString())
+          }
+          const external = update.transactions.some((tr) => tr.annotation(externalWrite) === true)
+          if (onState && !external && (update.docChanged || update.selectionSet)) {
+            const state = update.state
+            const { from, to } = state.selection.main
+            onState(state.doc.toString(), from === to ? '' : state.sliceDoc(from, to))
           }
         })
       ]
@@ -137,8 +155,8 @@ export function createEditor(
       }
       view.dispatch({
         changes: { from: start, to: endCur, insert: text.slice(start, endNew) },
-        // Programmatic write: not an undoable user edit.
-        annotations: Transaction.addToHistory.of(false)
+        // Programmatic write: not an undoable user edit, and not a count update.
+        annotations: [Transaction.addToHistory.of(false), externalWrite.of(true)]
       })
     },
     setTheme: (nextKind: 'light' | 'dark') => {

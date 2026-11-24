@@ -1,6 +1,13 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, Menu, clipboard, nativeTheme } from 'electron'
 import { basename, join, dirname } from 'node:path'
-import { writeFile as fsp, readFile as fsReadFile, access as fsAccess, appendFile } from 'node:fs/promises'
+import {
+  writeFile as fsp,
+  readFile as fsReadFile,
+  access as fsAccess,
+  appendFile,
+  mkdir as fsMkdir,
+  unlink as fsUnlink
+} from 'node:fs/promises'
 import { watch as fsWatch, readFileSync } from 'node:fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { buildAppMenu } from './menu'
@@ -57,8 +64,12 @@ import {
   listAvailableModels,
   listAgentSessions,
   readAgentSessionMessages,
+  runOneShot,
+  lastAssistantText,
+  ONE_SHOT_TIMEOUT_MS,
   type AgentHandle,
-  type AgentSettings
+  type AgentSettings,
+  type OneShotRequest
 } from './agent'
 
 // Nothing pi does should reach the network for catalogs or packages.
@@ -66,6 +77,22 @@ process.env.PI_OFFLINE = '1'
 
 let mainWindow: BrowserWindow | null = null
 let agent: AgentHandle | null = null
+/**
+ * Which conversation created (or last edited) each `.qz`, keyed by
+ * workspace-relative path. Filled by the workspace watcher whenever a quiz
+ * changes while a session is attached, so marking can go back to the
+ * conversation that knows the paper instead of a context-free grader.
+ *
+ * In memory only: it is a live-routing hint, not a property of the file. When
+ * the app restarts, no session is attached, and grading falls back to the
+ * isolated one-shot exactly as before.
+ */
+const quizSessions = new Map<string, string>()
+/** True while a chat turn is in flight, so a marking call never interleaves. */
+let agentBusy = false
+/** Set when the user presses Stop, so a transport-error retry cannot resurrect
+ *  a run they deliberately ended. */
+let agentAbortRequested = false
 
 function getWorkspace(): string | null {
   // YESTION_WORKSPACE pins a dev/test instance to a throwaway workspace.
@@ -127,8 +154,11 @@ async function createWindow(): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1440,
     height: 920,
-    minWidth: 900,
-    minHeight: 600,
+    // Low enough to share a half-screen tile on a laptop. At 900 the window
+    // could not sit beside another app whose own minimum is 900 (Kimi Code),
+    // and macOS refused the split — while Chrome, with a small minimum, worked.
+    minWidth: 560,
+    minHeight: 480,
     show: false,
     title: 'Yestion',
     // The app's own chrome is the top of the window: the traffic lights float
@@ -209,9 +239,12 @@ const stopWatching = (): void => {
   try { wsWatcher?.close() } catch { /* ignore */ }
   wsWatcher = null
   if (wsWatcherTimer) { clearTimeout(wsWatcherTimer); wsWatcherTimer = null }
+  pendingChanges.clear()
 }
 let wsWatcher: import('node:fs').FSWatcher | null = null
 let wsWatcherTimer: ReturnType<typeof setTimeout> | null = null
+/** Every path seen since the debounce window opened. */
+const pendingChanges = new Set<string>()
 // Files this app wrote itself (page saves). The watcher sees them moments
 // later; treating them as "external" made the renderer reload the page and
 // dump the caret at the end of the document. Anything NOT in here is an
@@ -227,40 +260,59 @@ const ensureWatching = (root: string | null): void => {
 }
 
 const watchWorkspace = (root: string): void => {
+  // Paths are workspace-relative, so a mapping from another workspace could
+  // point at the wrong file's conversation.
+  if (watchedRoot !== root) quizSessions.clear()
   watchedRoot = root
   try { wsWatcher?.close() } catch { /* ignore */ }
   wsWatcher = null
+  pendingChanges.clear()
   try {
     wsWatcher = fsWatch(root, { recursive: true }, (_event, filename) => {
       if (!filename) return
+      const rel = String(filename).replace(/\\/g, '/')
+      if (rel.startsWith('.yestion') || rel.startsWith('.pi')) return
+      // Collect, do not overwrite: a burst of writes used to reset the debounce
+      // timer and remember only the last filename, so every other changed file
+      // — including the page on screen — was never reported.
+      pendingChanges.add(rel)
       if (wsWatcherTimer) clearTimeout(wsWatcherTimer)
       wsWatcherTimer = setTimeout(() => {
         wsWatcherTimer = null
-        const rel = String(filename).replace(/\\/g, '/')
-        if (rel.startsWith('.yestion') || rel.startsWith('.pi')) return
+        const changed = [...pendingChanges]
+        pendingChanges.clear()
         // Private workspaces: mirror edits (including the agent's) back into
         // the encrypted container instead of telling the UI to re-read files.
         if (currentVault()) {
-          scheduleVaultFlush()
+          if (changed.length > 0) scheduleVaultFlush()
           return
         }
-        // Our own save echoing back? Then there is nothing to refresh.
-        const mine = selfWrites.get(rel)
-        if (mine) {
-          if (Date.now() - mine.at > 8000) {
-            selfWrites.delete(rel)
-          } else {
-            try {
-              if (readFileSync(join(root, rel), 'utf-8') === mine.body) {
-                selfWrites.delete(rel)
-                return
+        for (const rel of changed) {
+          // Our own save echoing back? Then there is nothing to refresh.
+          const mine = selfWrites.get(rel)
+          if (mine) {
+            if (Date.now() - mine.at > 8000) {
+              selfWrites.delete(rel)
+            } else {
+              try {
+                if (readFileSync(join(root, rel), 'utf-8') === mine.body) {
+                  selfWrites.delete(rel)
+                  continue
+                }
+              } catch {
+                /* unreadable → treat as external */
               }
-            } catch {
-              /* unreadable → treat as external */
             }
           }
+          // Remember which conversation is behind a quiz as it is written. The
+          // agent's own file writes arrive here as external changes, so the
+          // session attached at that moment is the one that authored the paper.
+          if (rel.toLowerCase().endsWith('.qz')) {
+            const session = agent?.sessionFile()
+            if (session) quizSessions.set(rel, session)
+          }
+          mainWindow?.webContents.send('ws:external-change', rel)
         }
-        mainWindow?.webContents.send('ws:external-change', rel)
       }, 350)
     })
   } catch (err) {
@@ -792,6 +844,46 @@ function registerWorkspaceHandlers(): void {
       return null
     }
   })
+  // In-flight quiz attempts. These are the answers a candidate has typed, not
+  // page content, and they used to live only in the renderer's memory — a
+  // relaunch, a crash or a stray quit threw away an entire paper. They live
+  // under `.yestion/attempts/`, which both the watcher and the tree skip.
+  const attemptPath = (root: string, relPath: string): string => {
+    const safe = relPath
+      .replace(/\\/g, '/')
+      .split('/')
+      .map((part) => encodeURIComponent(part))
+      .join('__')
+    return join(root, '.yestion', 'attempts', `${safe}.json`)
+  }
+  ipcMain.handle('quiz:attemptSave', async (_e, relPath: string, data: string) => {
+    const root = getWorkspace()
+    if (!root) return false
+    const file = attemptPath(root, relPath)
+    await fsMkdir(dirname(file), { recursive: true })
+    await fsp(file, data, 'utf-8')
+    return true
+  })
+  ipcMain.handle('quiz:attemptLoad', async (_e, relPath: string) => {
+    const root = getWorkspace()
+    if (!root) return null
+    try {
+      return await fsReadFile(attemptPath(root, relPath), 'utf-8')
+    } catch {
+      return null
+    }
+  })
+  ipcMain.handle('quiz:attemptClear', async (_e, relPath: string) => {
+    const root = getWorkspace()
+    if (!root) return false
+    try {
+      await fsUnlink(attemptPath(root, relPath))
+    } catch {
+      /* nothing saved yet */
+    }
+    return true
+  })
+
   ipcMain.handle('ws:save', async (_e, payload: { relPath: string; title: string; icon: string; body: string }) => {
     const root = getWorkspace()
     if (!root) return false
@@ -890,6 +982,11 @@ function registerAgentHandlers(): void {
     sessionFile: agent?.sessionFile() ?? null
   })
 
+  /** How the last assistant message of a turn ended, captured from the event
+   *  stream — the same data the panel logs. The handle's message array does not
+   *  reliably carry it. */
+  let lastTurnOutcome: { stopReason?: string; errorMessage?: string } | null = null
+
   const launch = async (root: string, settings: AgentSettings) => {
     if (agent) {
       await agent.dispose()
@@ -901,6 +998,16 @@ function registerAgentHandlers(): void {
       { ...settings, thinkingLevel: (settingsStore.get('agentThinking') as string) || 'max' },
       app.getPath('userData'),
       (event) => {
+        const ev = event as {
+          type?: string
+          message?: { role?: string; stopReason?: string; errorMessage?: string }
+        }
+        if (ev?.type === 'message_end' || ev?.type === 'turn_end') {
+          const msg = ev.message
+          if (msg?.role === 'assistant') {
+            lastTurnOutcome = { stopReason: msg.stopReason, errorMessage: msg.errorMessage }
+          }
+        }
         send('agent:event', event)
       }
     )
@@ -917,6 +1024,63 @@ function registerAgentHandlers(): void {
     const root = getWorkspace()
     if (!root) throw new Error('Choose a workspace folder first')
     return root
+  }
+
+  /**
+   * Errors that mean the stream died rather than the work being impossible:
+   * a dropped connection, a provider restart, a gateway timeout. pi retries a
+   * stream it knows about; `terminated` and friends arrive as a finished
+   * assistant message with `stopReason: "error"` and are not retried, which is
+   * what made a long task stop mid-sentence.
+   */
+  /** Errors that mean retrying cannot help. */
+  const PERMANENT_ERROR =
+    /\b(?:400|401|403|404)\b|invalid api key|authentication|unauthori[sz]ed|model .*not found|insufficient|quota|balance|billing|context length/i
+
+  async function promptWithContinuation(
+    handle: AgentHandle,
+    text: string,
+    images?: { data: string; mimeType: string }[]
+  ): Promise<void> {
+    agentAbortRequested = false
+    lastTurnOutcome = null
+    await handle.prompt(text, images)
+    // Two extra attempts. Enough to ride out a dropped stream; not enough to
+    // hammer a provider that is genuinely down.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (agentAbortRequested) return
+      // Cast defeats TS's control-flow narrowing: the assignment happens in the
+      // event subscription, which the compiler cannot see across the await.
+      const outcome = lastTurnOutcome as {
+        stopReason?: string
+        errorMessage?: string
+      } | null
+      if (!outcome) return
+      const stop = outcome.stopReason ?? ''
+      const errText = String(outcome.errorMessage ?? '')
+      // Only a provider *error* is retried. `aborted` is never continued: it
+      // is what a user Stop produces, and a Stop must end the run even if the
+      // flag arrives a tick late. Every error is retried unless the text names
+      // a condition retrying cannot fix, because providers word a dropped
+      // stream a dozen ways ("Connection error." is one).
+      const continuable = stop === 'error' && !PERMANENT_ERROR.test(errText)
+      if (!continuable) return
+      void logLine(
+        `agent: turn ended early (${stop}${errText ? `: ${errText}` : ''}) — continuing (${attempt}/2)`,
+        'warn'
+      )
+      send('agent:event', {
+        type: 'retry_scheduled',
+        attempt,
+        maxAttempts: 2,
+        errorMessage: outcome.errorMessage
+      })
+      lastTurnOutcome = null
+      await handle.prompt(
+        'The previous response was cut off by a transport error. Continue exactly where you left off. ' +
+          'Do not repeat work that is already done and do not restart the task.'
+      )
+    }
   }
 
   ipcMain.handle('agent:start', async (_e, settings: AgentSettings) => {
@@ -957,7 +1121,102 @@ function registerAgentHandlers(): void {
       const withContext = context && context.title
         ? `[User is viewing the page "${context.title}" (${context.relPath}) in Yestion right now.]\n\n${text}`
         : text
-      await agent.prompt(withContext, images)
+      agentBusy = true
+      try {
+        await promptWithContinuation(agent, withContext, images)
+      } finally {
+        agentBusy = false
+      }
+    }
+  )
+
+  // The grader's transport. Deliberately not `agent:prompt`: this must leave no
+  // trace in the transcript and must not race a turn the user is having.
+  ipcMain.handle('agent:oneshot', async (_e, req: OneShotRequest) => {
+    const root = getWorkspace()
+    if (!root) return { ok: false, text: '', error: 'No workspace open', elapsedMs: 0 }
+    // The model the user has configured for the panel. Reading it from the
+    // store rather than from `agentSettings` means grading works even if the
+    // chat panel was never opened this session.
+    const settings: AgentSettings = agentSettings ?? {
+      provider: (settingsStore.get('agentProvider') as string) || 'anthropic',
+      model: (settingsStore.get('agentModel') as string) || '',
+      apiKey: (settingsStore.get('agentApiKey') as string) || '',
+      thinkingLevel: (settingsStore.get('agentThinking') as string) || 'low'
+    }
+    const result = await runOneShot(settings, req)
+    if (!result.ok) void logLine(`agent oneshot failed: ${result.error ?? 'unknown'}`, 'error')
+    return result
+  })
+
+  /**
+   * Marking transport for the quiz runner.
+   *
+   * When the conversation that wrote the paper is still the attached session,
+   * the marking request is sent there as a normal turn — the model keeps the
+   * context it had while authoring the quiz, and the exchange is visible in
+   * the transcript. Otherwise (another conversation is open, the app was
+   * restarted, or the user is mid-turn) it degrades to the isolated one-shot,
+   * which is what grading used to be. The quiz clock is paused either way.
+   */
+  ipcMain.handle(
+    'agent:gradeQuiz',
+    async (
+      _e,
+      req: { relPath: string; system: string; prompt: string; timeoutMs?: number }
+    ): Promise<{ ok: boolean; text: string; error?: string; elapsedMs: number }> => {
+      const started = Date.now()
+      const elapsed = (): number => Date.now() - started
+      const target = quizSessions.get(req.relPath)
+      const live = agent
+      const inChat = !!live && !!target && live.sessionFile() === target && !agentBusy
+
+      if (live && inChat) {
+        const prefix = `[Quiz marking request from the Yestion quiz runner. Do not use any tools — reply with the JSON object only.]\n\n${req.system}`
+        const text = `${prefix}\n\n---\n\n${req.prompt}`
+        const timeoutMs = req.timeoutMs ?? ONE_SHOT_TIMEOUT_MS
+        let timer: ReturnType<typeof setTimeout> | null = null
+        agentBusy = true
+        // The panel did not type this message; tell it to show the user turn so
+        // the transcript reads as a conversation rather than a reply from nowhere.
+        send('agent:injected-prompt', text)
+        try {
+          await Promise.race([
+            live.prompt(text),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error('The conversation did not answer in time.')),
+                timeoutMs
+              )
+            })
+          ])
+          const reply = lastAssistantText(live.messages()).trim()
+          if (!reply) {
+            return { ok: false, text: '', error: 'The conversation returned no text.', elapsedMs: elapsed() }
+          }
+          return { ok: true, text: reply, elapsedMs: elapsed() }
+        } catch (err) {
+          // Stop the turn we started: a reply that lands after the runner has
+          // already fallen back would appear in the chat as an orphan.
+          void live.abort().catch(() => undefined)
+          return { ok: false, text: '', error: String((err as Error)?.message ?? err), elapsedMs: elapsed() }
+        } finally {
+          if (timer) clearTimeout(timer)
+          agentBusy = false
+          send('agent:injected-done', null)
+        }
+      }
+
+      // No creating conversation is attached — the old, context-free path.
+      const root = getWorkspace()
+      if (!root) return { ok: false, text: '', error: 'No workspace open', elapsedMs: elapsed() }
+      const settings: AgentSettings = agentSettings ?? {
+        provider: (settingsStore.get('agentProvider') as string) || 'anthropic',
+        model: (settingsStore.get('agentModel') as string) || '',
+        apiKey: (settingsStore.get('agentApiKey') as string) || '',
+        thinkingLevel: (settingsStore.get('agentThinking') as string) || 'low'
+      }
+      return runOneShot(settings, req)
     }
   )
 
@@ -1002,7 +1261,7 @@ function registerAgentHandlers(): void {
       { label: 'Reveal in Finder', click: () => action('reveal') },
       { label: 'Copy Path', click: () => action('copy-path') }
     ]
-    if (payload.kind === 'page') {
+    if (payload.kind === 'page' || payload.kind === 'quiz') {
       items.push({ label: 'Copy Page Link', click: () => action('copy-link') })
     }
     if (payload.isTab) {
@@ -1028,6 +1287,7 @@ function registerAgentHandlers(): void {
   })
 
   ipcMain.handle('agent:abort', async () => {
+    agentAbortRequested = true
     await agent?.abort()
   })
 

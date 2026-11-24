@@ -49,6 +49,8 @@ interface SettingsOpts {
   onAgentSettingsChanged: () => void
   onThemeChange: (id: string) => void
   onFontChange: (id: string) => void
+  /** Which unit the page footer counts in. */
+  onCountModeChange: (mode: 'words' | 'asian') => void
 }
 
 export function setupSettings(opts: SettingsOpts): { show: () => void; close: () => HTMLElement | null } {
@@ -57,6 +59,7 @@ export function setupSettings(opts: SettingsOpts): { show: () => void; close: ()
   const themeSelect = document.getElementById('settings-theme') as HTMLSelectElement
   const fontSelect = document.getElementById('settings-font') as HTMLSelectElement
   const sizeSelect = document.getElementById('settings-size') as HTMLSelectElement | null
+  const countingSelect = document.getElementById('settings-counting') as HTMLSelectElement | null
   const providersHost = document.getElementById('settings-providers') as HTMLElement
   const modelsHost = document.getElementById('settings-models') as HTMLElement
   const defaultModelSelect = document.getElementById('settings-default-model') as HTMLSelectElement
@@ -506,6 +509,14 @@ export function setupSettings(opts: SettingsOpts): { show: () => void; close: ()
     })
   }
 
+  if (countingSelect) {
+    countingSelect.addEventListener('change', () => {
+      const mode = countingSelect.value === 'asian' ? 'asian' : 'words'
+      void window.api.setSettings('wordCountMode', mode)
+      opts.onCountModeChange(mode)
+    })
+  }
+
   async function load(): Promise<void> {
     const w = (await window.api.wsGet()).workspace
     workspacePathEl.textContent = w ?? 'No workspace'
@@ -513,6 +524,10 @@ export function setupSettings(opts: SettingsOpts): { show: () => void; close: ()
     fillFontSelect(fontSelect, (await window.api.getSettings('previewFont')) as string | undefined)
     if (sizeSelect) {
       sizeSelect.value = ((await window.api.getSettings('renderFontSize')) as string) || 'm'
+    }
+    if (countingSelect) {
+      countingSelect.value =
+        ((await window.api.getSettings('wordCountMode')) as string) === 'asian' ? 'asian' : 'words'
     }
     thinkingSelect.value = ((await window.api.getSettings('agentThinking')) as string) || 'max'
     await loadProviders()

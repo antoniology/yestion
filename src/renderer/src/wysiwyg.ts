@@ -12,10 +12,13 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import MarkdownIt from 'markdown-it'
 import { DOMParser as PMDOMParser } from '@tiptap/pm/model'
-import { NodeSelection, TextSelection } from '@tiptap/pm/state'
+import { NodeSelection, Plugin, TextSelection } from '@tiptap/pm/state'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PMNode } from 'prosemirror-model'
 import { Fragment as PMFragment } from 'prosemirror-model'
+import { relaxCjkEmphasis, stripCjkMarkers } from './emphasis'
+import { anchorFloat } from './floats'
+import { repairTables } from './tables'
 import type { EditorView } from 'prosemirror-view'
 import { applyIcon, iconEl, iconSvg, type IconName } from './icons'
 
@@ -481,6 +484,11 @@ function openMathEditor(editor: Editor, pos: number, onClose?: () => void): void
   input.value = initialTex
   popup.appendChild(input)
   document.body.appendChild(popup)
+  // Same click trap as the highlight popup: the editor opens on mousedown and
+  // the `click` that follows is seen by the shared dismissal pass as a click
+  // outside the popup, closing it instantly. Anchor it to the equation.
+  const nodeDom = editor.view.nodeDOM(pos)
+  anchorFloat(popup, nodeDom instanceof HTMLElement ? nodeDom : null)
 
   const place = (): void => {
     try {
@@ -1056,6 +1064,29 @@ const RichTaskItem = TaskItem.extend({
 // (an equation, an image). Check the cell's node content instead, and fall back
 // to HTML for tables pipes can't express (spans, multi-paragraph cells).
 const RichTable = Table.extend({
+  addAttributes() {
+    return {
+      ...(this.parent?.() ?? {}),
+      /** Standard pipe table, borderless, or the booktabs/LaTeX look. */
+      tableStyle: {
+        default: 'standard',
+        parseHTML: (el: HTMLElement) => el.getAttribute('data-table-style') || 'standard',
+        renderHTML: (attrs: Record<string, unknown>) => ({
+          'data-table-style': String(attrs.tableStyle ?? 'standard')
+        })
+      },
+      /** Which axis carries the weight: the header row (default) or the first column. */
+      boldAxis: {
+        default: 'row',
+        parseHTML: (el: HTMLElement) =>
+          el.getAttribute('data-bold-axis') === 'column' ? 'column' : 'row',
+        renderHTML: (attrs: Record<string, unknown>) => ({
+          'data-bold-axis': String(attrs.boldAxis ?? 'row')
+        })
+      }
+    }
+  },
+
   addStorage() {
     return {
       markdown: {
@@ -1077,7 +1108,12 @@ const RichTable = Table.extend({
             rows.length > 0 &&
             cellsOf(rows[0]).every((c) => !complexCell(c, true)) &&
             rows.slice(1).every((r) => cellsOf(r).every((c) => !complexCell(c, false)))
-          if (!pipeSafe) {
+          // Pipe tables cannot carry a style or a bold-axis choice, so a styled
+          // table is written as its HTML form — which the loader parses back.
+          const styled =
+            String(node.attrs.tableStyle ?? 'standard') !== 'standard' ||
+            String(node.attrs.boldAxis ?? 'row') !== 'row'
+          if (!pipeSafe || styled) {
             // Keep the <table> wrapper: serializing node.content alone wrote bare
             // <tr>/<th> elements, which stopped being a table on the next load —
             // its images then spilled out of the cells as loose blocks.
@@ -1126,6 +1162,58 @@ const RichTable = Table.extend({
  * A paragraph above is left to ProseMirror: merging a heading into it is what
  * you want there.
  */
+/**
+ * Put the table's style and bold-axis choices on its DOM element.
+ *
+ * The attributes round-trip through markdown (the serializer writes the HTML
+ * form) but ProseMirror rebuilds a table's DOM from cells and does not carry
+ * them onto the element, so the CSS never saw the choice. Node decorations
+ * cannot help either: prosemirror-tables supplies the first `decorations` prop
+ * (the column-resize handles) and only one plugin's decorations are used.
+ *
+ * A view plugin walks the document's tables and the DOM's tables — both in
+ * document order — and stamps the attributes on after every update.
+ */
+const TableStyleDecoration = Extension.create({
+  name: 'yestionTableStyle',
+  addProseMirrorPlugins() {
+    const sync = (view: EditorView): void => {
+      const tables: { node: PMNode; pos: number }[] = []
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'table') tables.push({ node, pos })
+      })
+      const elements = [...view.dom.querySelectorAll('table')].filter(
+        (el) => !el.closest('[data-type="raw-html"]')
+      )
+      // Which table holds the caret? That one gets the editing guides; the
+      // guides themselves are only visible while the editor has focus.
+      const $from = view.state.selection.$from
+      let activePos = -1
+      for (let d = $from.depth; d > 0; d--) {
+        if ($from.node(d).type.name === 'table') {
+          activePos = $from.before(d)
+          break
+        }
+      }
+      tables.forEach(({ node, pos }, index) => {
+        const el = elements[index]
+        if (!el) return
+        el.setAttribute('data-table-style', String(node.attrs.tableStyle ?? 'standard'))
+        el.setAttribute('data-bold-axis', node.attrs.boldAxis === 'column' ? 'column' : 'row')
+        el.setAttribute('data-editing', pos === activePos ? 'true' : 'false')
+      })
+    }
+    return [
+      new Plugin({
+        view: (view) => {
+          sync(view)
+          return { update: (updated) => sync(updated) }
+        }
+      })
+    ]
+  }
+})
+
 const HeadingBehaviour = Extension.create({
   name: 'yestionHeadingBehaviour',
   priority: 1000,
@@ -1766,7 +1854,8 @@ function openHighlightPopup(
   anchor: { left: number; top: number },
   current: string,
   onPick: (color: string) => void,
-  onCancel?: () => void
+  onCancel?: () => void,
+  anchorEl?: Element | null
 ): void {
   closeHighlightPopup()
   const pop = document.createElement('div')
@@ -1789,6 +1878,12 @@ function openHighlightPopup(
   pop.style.left = anchor.left + 'px'
   pop.style.top = anchor.top + 'px'
   document.body.appendChild(pop)
+  // The click that opened this popup is still in flight: ProseMirror handles
+  // it on mouseup, and the shared dismissal pass then sees a capture-phase
+  // `click` on the highlight — not on the popup — and closes it instantly.
+  // Anchoring the popup to the highlighted text marks that click as "part of
+  // the surface", so it survives.
+  anchorFloat(pop, anchorEl ?? null)
   highlightPopupEl = pop
   highlightPopupOutside = (e) => {
     if (highlightPopupEl && !highlightPopupEl.contains(e.target as Node)) {
@@ -1993,7 +2088,7 @@ function activeEditor(): Editor | null {
 }
 
 // Click a highlight → popup to change its color.
-function handleHighlightClick(view: EditorView, pos: number): boolean {
+function handleHighlightClick(view: EditorView, pos: number, event?: MouseEvent): boolean {
   const markType = view.state.schema.marks.highlight
   if (!markType) return false
   const $pos = view.state.doc.resolve(pos)
@@ -2013,6 +2108,9 @@ function handleHighlightClick(view: EditorView, pos: number): boolean {
   })
   if (end <= start) return false
   const coords = view.coordsAtPos(pos)
+  const clicked = (event?.target as Element | null)?.closest?.(
+    '[data-type="yestion-highlight"]'
+  )
   openHighlightPopup(
     { left: coords.left, top: coords.bottom + 6 },
     hm.attrs.color,
@@ -2020,7 +2118,9 @@ function handleHighlightClick(view: EditorView, pos: number): boolean {
       const tr = view.state.tr
       tr.addMark(start, end, markType.create({ color }))
       view.dispatch(tr)
-    }
+    },
+    undefined,
+    clicked ?? null
   )
   return true
 }
@@ -2095,6 +2195,8 @@ function openTableSizePicker(editor: Editor, anchor: { left: number; top: number
 
 // ---- contextual toolbar: visible whenever the caret is inside a table ----
 let tableToolbar: HTMLElement | null = null
+let tableStyleSelect: HTMLSelectElement | null = null
+let tableBoldAxisSelect: HTMLSelectElement | null = null
 
 function tableToolbarEl(): HTMLElement {
   if (tableToolbar) return tableToolbar
@@ -2126,6 +2228,53 @@ function tableToolbarEl(): HTMLElement {
   btn('– row', 'Delete row', (e) => void e.chain().focus().deleteRow().run())
   btn('– col', 'Delete column', (e) => void e.chain().focus().deleteColumn().run())
   btn('', 'Delete table', (e) => void e.chain().focus().deleteTable().run(), 'trash')
+
+  const styleSep = document.createElement('span')
+  styleSep.className = 'table-tool-sep'
+  bar.appendChild(styleSep)
+
+  const select = (
+    title: string,
+    options: [string, string][],
+    apply: (editor: Editor, value: string) => void
+  ): HTMLSelectElement => {
+    const el = document.createElement('select')
+    el.className = 'table-tool-select'
+    el.title = title
+    for (const [value, label] of options) {
+      const opt = document.createElement('option')
+      opt.value = value
+      opt.textContent = label
+      el.appendChild(opt)
+    }
+    el.addEventListener('change', () => {
+      const editor = currentEditorRef
+      if (editor) apply(editor, el.value)
+    })
+    bar.appendChild(el)
+    return el
+  }
+
+  tableStyleSelect = select(
+    'Table style',
+    [
+      ['standard', 'Standard'],
+      ['borderless', 'Borderless'],
+      ['latex', 'LaTeX']
+    ],
+    (editor, value) =>
+      void editor.chain().focus().updateAttributes('table', { tableStyle: value }).run()
+  )
+  tableBoldAxisSelect = select(
+    'Bold axis',
+    [
+      ['row', 'Bold top row'],
+      ['column', 'Bold left column']
+    ],
+    (editor, value) =>
+      void editor.chain().focus().updateAttributes('table', { boldAxis: value }).run()
+  )
+
   document.body.appendChild(bar)
   tableToolbar = bar
   return bar
@@ -2148,6 +2297,9 @@ function updateTableToolbar(editor: Editor): void {
   }
   const rect = table.getBoundingClientRect()
   bar.hidden = false
+  const attrs = editor.getAttributes('table') as { tableStyle?: string; boldAxis?: string }
+  if (tableStyleSelect) tableStyleSelect.value = String(attrs.tableStyle ?? 'standard')
+  if (tableBoldAxisSelect) tableBoldAxisSelect.value = attrs.boldAxis === 'column' ? 'column' : 'row'
   const width = bar.offsetWidth || 260
   bar.style.left = Math.max(8, Math.min(rect.left + rect.width / 2 - width / 2, window.innerWidth - width - 8)) + 'px'
   bar.style.top = Math.max(6, rect.top - bar.offsetHeight - 6) + 'px'
@@ -2525,7 +2677,10 @@ function detectSlashTrigger(editor: Editor): SlashTrigger | null {
   const parent = $from.parent
   if (!parent.isTextblock || parent.type.name === 'codeBlock') return null
   const text = parent.textBetween(0, $from.parentOffset, undefined, '\ufffc')
-  const m = /^(\s*)\/([a-zA-Z0-9-]*)$/.exec(text)
+  // A line may begin with preserved blank answer lines \u2014 hard breaks, which
+  // textBetween surfaces as \ufffc. Those used to stop the slash trigger from
+  // matching, so "/" did nothing on the line after a list or a blank gap.
+  const m = /^((?:\s|\ufffc)*)\/([a-zA-Z0-9-]*)$/.exec(text)
   if (!m) return null
   const slashOffset = m[1].length // index of "/" within the block text
   return {
@@ -2555,6 +2710,50 @@ export interface RichEditor {
   focus: () => void
   /** Read-only mirrors (the split pane) turn off editing but keep rendering. */
   setEditable: (editable: boolean) => void
+}
+
+/**
+ * Plain text and the selected slice, for the word count. The selection is ''
+ * when the caret is collapsed, so callers can tell "nothing selected" from
+ * "an empty selection".
+ */
+export interface EditorCounts {
+  text: string
+  selected: string
+}
+
+/** The subscription carries the editor's ProseMirror view, which is the one
+ *  identity both the TipTap instance and its public `RichEditor` share. */
+type CountHandler = (view: Editor['view'], counts: EditorCounts) => void
+const countHandlers = new Set<CountHandler>()
+
+/**
+ * Subscribe to text/selection changes in any rich editor.
+ *
+ * The count is a read of editor state, so it belongs here rather than being
+ * reconstructed in main from DOM events: `selectionchange` fires for the title
+ * input and the sidebar too, and the markdown below the editor is not the text
+ * being written.
+ */
+export function onEditorCountChange(handler: CountHandler): () => void {
+  countHandlers.add(handler)
+  return () => countHandlers.delete(handler)
+}
+
+export function readCounts(editor: Pick<RichEditor, 'view'>): EditorCounts {
+  const { doc, selection } = editor.view.state
+  // Leaf nodes (images, math) have no text; passing '' keeps a picture from
+  // contributing a stray separator to the count.
+  const text = doc.textBetween(0, doc.content.size, '\n', '')
+  const selected =
+    selection.from === selection.to ? '' : doc.textBetween(selection.from, selection.to, '\n', '')
+  return { text, selected }
+}
+
+function notifyCounts(editor: Editor): void {
+  if (countHandlers.size === 0) return
+  const counts = readCounts(editor)
+  for (const handler of countHandlers) handler(editor.view, counts)
 }
 
 /** Slash menus, one per live editor (the main pane and the split pane). */
@@ -2956,6 +3155,7 @@ export function createRichEditor(
       }).configure({ inline: true }),
       TableKit.configure({ table: false }),
       RichTable.configure({ resizable: true }),
+      TableStyleDecoration,
       Column,
       ColumnList,
       HeadingBehaviour,
@@ -2983,8 +3183,8 @@ export function createRichEditor(
     ],
     editorProps: {
       attributes: { spellcheck: 'false' },
-      handleClick: (view, pos) => {
-        return handleHighlightClick(view, pos)
+      handleClick: (view, pos, event) => {
+        return handleHighlightClick(view, pos, event)
       },
       handleDOMEvents: {
         click: (_view, event) => {
@@ -3043,7 +3243,7 @@ export function createRichEditor(
           }
         }
         event.preventDefault()
-        const html = getClipboardMd().render(text)
+        const html = getClipboardMd().render(repairTables(relaxCjkEmphasis(text)))
         const wrap = document.createElement('div')
         wrap.innerHTML = html // runs our math/svg/page-link rules
         const slice = PMDOMParser.fromSchema(view.state.schema).parseSlice(wrap, {
@@ -3092,19 +3292,30 @@ export function createRichEditor(
       // Two editors can be mounted at once (split view): the focused one is the
       // one popups, the table toolbar and input rules should act on.
       currentEditorRef = editor
+      notifyCounts(editor)
     },
     onUpdate: () => {
       onChange()
       updateSlashMenu()
       updateContextToolbars(editor)
+      notifyCounts(editor)
     },
     onSelectionUpdate: () => {
       updateSlashMenu()
       updateContextToolbars(editor)
+      notifyCounts(editor)
     },
     onBlur: () => {
-      hideMenu()
-      hideContextToolbars()
+      // Clicking a control inside a contextual toolbar (the table style or
+      // bold-axis <select>) blurs the editor. Hiding the toolbar there closed
+      // the very dropdown being opened, so let focus settle and check where it
+      // went before hiding anything.
+      window.setTimeout(() => {
+        const active = document.activeElement
+        if (active?.closest('.table-toolbar, .image-toolbar, .column-toolbar')) return
+        hideMenu()
+        hideContextToolbars()
+      }, 0)
     }
   })
 
@@ -3231,7 +3442,9 @@ export function createRichEditor(
     setEditable: (editable: boolean) => editor.setEditable(editable),
     getMarkdown: () => {
       const store = editor.storage as unknown as { markdown: { getMarkdown: () => string } }
-      const md = store.markdown.getMarkdown()
+      // The CJK emphasis repair is an in-memory aid (see emphasis.ts); strip
+      // the markers so the file keeps exactly the text the user typed.
+      const md = stripCjkMarkers(store.markdown.getMarkdown())
       // A hard break at the very end of the document would sit at EOF with no
       // newline; markdown then reads the backslash as a literal character and
       // the break grows on every save/load round trip. Terminate it.
@@ -3239,7 +3452,7 @@ export function createRichEditor(
     },
     setContent: (markdown: string) => {
       hideMenu()
-      editor.commands.setContent(markdown, { emitUpdate: false })
+      editor.commands.setContent(repairTables(relaxCjkEmphasis(markdown)), { emitUpdate: false })
     },
     focus: () => editor.commands.focus()
   }
@@ -3361,7 +3574,7 @@ export function localFileUrl(path: string): string {
   return 'file://' + decoded.split('/').map((segment) => encodeURIComponent(segment)).join('/')
 }
 
-function resolveImageSrc(src: string, baseDir: string | null): string {
+export function resolveImageSrc(src: string, baseDir: string | null): string {
   if (!src) return src
   if (/^(https?:|data:|file:|blob:|mailto:)/i.test(src)) return src
   // Absolute paths (how dropped/pasted image files are referenced) resolve on

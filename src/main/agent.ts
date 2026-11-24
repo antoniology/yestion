@@ -1,5 +1,7 @@
 import { promises as fs } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
+import deepseekSearchExtensionSource from './agent-extensions/deepseek-search.ts?raw'
 import systemPromptAppend from './prompts/system.md?raw'
 import { listModels, loadProviders, migratePiSessions, writePiConfig, sessionsDir } from './providers'
 import yestionSkillText from './prompts/skill.md?raw'
@@ -9,7 +11,8 @@ import { logLine } from './log'
 // (Type-only imports are erased at compile time and are safe.)
 type PiSessionEvent = {
   type: string
-  assistantMessageEvent?: { type: string; delta?: string }
+  /** `text_delta` streams a piece; `text_end` carries the whole block. */
+  assistantMessageEvent?: { type: string; delta?: string; content?: string }
   error?: string
 }
 
@@ -98,6 +101,43 @@ function loadPi(): Promise<PiApi> {
 
 function yestionSystemPrompt(workspaceRoot: string): string {
   return systemPromptAppend.replaceAll('{{WORKSPACE_ROOT}}', workspaceRoot)
+}
+
+// ---------------------------------------------------------------------------
+// Bundled agent extensions
+// ---------------------------------------------------------------------------
+
+/**
+ * Extensions that ship with the app (DeepSeek web search/fetch today).
+ *
+ * They live here as plain TypeScript so they stay readable, and are inlined into
+ * the main bundle at build time; at session start they are written into
+ * `<userData>/agent/extensions/`, which pi's resource loader scans for both the
+ * chat agent and any session the user later resumes. The files are app-owned
+ * and rewritten on change, so local edits in the user's agent dir do not survive.
+ */
+const BUNDLED_EXTENSIONS: { file: string; source: string }[] = [
+  { file: 'deepseek-search.ts', source: deepseekSearchExtensionSource }
+]
+
+async function seedAgentExtensions(agentDir: string): Promise<void> {
+  const dir = join(agentDir, 'extensions')
+  for (const { file, source } of BUNDLED_EXTENSIONS) {
+    const path = join(dir, file)
+    try {
+      if ((await fs.readFile(path, 'utf-8')) === source) continue
+    } catch {
+      /* first run: nothing there yet */
+    }
+    try {
+      await fs.mkdir(dir, { recursive: true })
+      await fs.writeFile(path, source, 'utf-8')
+      void logLine(`agent extensions: wrote ${path}`, 'info')
+    } catch (err) {
+      // A missing search tool is a degraded agent, not a broken app: keep going.
+      void logLine(`agent extensions: could not write ${path}: ${String((err as Error)?.message ?? err)}`, 'error')
+    }
+  }
 }
 
 // The Yestion skill: seeded at .pi/skills/yestion/SKILL.md *only when missing*,
@@ -197,6 +237,182 @@ function stripImageData(value: unknown): unknown {
   return value
 }
 
+// ---------------------------------------------------------------------------
+// One-shot calls
+// ---------------------------------------------------------------------------
+
+export interface OneShotRequest {
+  /**
+   * Replaces the system prompt outright. A grader is not a notebook assistant:
+   * it must not inherit the Yestion skill, the workspace context files, or the
+   * "you are editing this page" framing.
+   */
+  system: string
+  /** The single user turn. */
+  prompt: string
+  /** Abort after this long. Defaults to `ONE_SHOT_TIMEOUT_MS`. */
+  timeoutMs?: number
+  /** Defaults to `'low'`: marking against a rubric does not need deep reasoning,
+   *  and the caller is sitting in front of a paused exam clock waiting. */
+  thinkingLevel?: string
+}
+
+export interface OneShotResult {
+  ok: boolean
+  /** The model's reply, trimmed. Empty when `ok` is false. */
+  text: string
+  /** Why it failed, when it did. */
+  error?: string
+  /** Wall-clock ms, so the caller can add the pause back to a running clock. */
+  elapsedMs: number
+}
+
+/** A grading call that has not answered in this long has stopped being useful. */
+export const ONE_SHOT_TIMEOUT_MS = 90_000
+
+interface OneShotSession {
+  messages?: unknown[]
+  subscribe: (fn: (event: PiSessionEvent) => void) => () => void
+  prompt: (text: string) => Promise<void>
+  abort: () => Promise<void>
+  dispose: () => void
+}
+
+/** Concatenated text of the last assistant message, for a reply that never
+ *  streamed (or streamed less than the final message holds). */
+export function lastAssistantText(messages: unknown[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: string; content?: unknown }
+    if (m?.role !== 'assistant') continue
+    const blocks = Array.isArray(m.content) ? m.content : []
+    return blocks
+      .map((b) => b as { type?: string; text?: string })
+      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text as string)
+      .join('')
+  }
+  return ''
+}
+
+// One call at a time. Each one builds its own ModelRuntime, and two of those
+// interleaving over the same auth/models files underneath the user's live chat
+// session is a race with nothing to gain from winning it.
+let oneShotQueue: Promise<unknown> = Promise.resolve()
+
+/**
+ * Ask the model one question and give back its answer — no tools, no session
+ * file, no transcript, nothing the user can see or resume.
+ *
+ * This exists because grading an exam answer is not a chat turn: routing it
+ * through the live handle would scroll marking prompts through the agent panel
+ * and race whatever the user is already asking. Failures are returned rather
+ * than thrown, because every caller has to degrade gracefully anyway — an exam
+ * must never be blocked by a network call.
+ */
+export function runOneShot(settings: AgentSettings, req: OneShotRequest): Promise<OneShotResult> {
+  const next = () => oneShotNow(settings, req)
+  const run = oneShotQueue.then(next, next)
+  oneShotQueue = run.catch(() => undefined)
+  return run
+}
+
+async function oneShotNow(settings: AgentSettings, req: OneShotRequest): Promise<OneShotResult> {
+  const started = Date.now()
+  const elapsed = (): number => Date.now() - started
+  const fail = (error: string): OneShotResult => ({ ok: false, text: '', error, elapsedMs: elapsed() })
+
+  let session: OneShotSession | null = null
+  let unsubscribe: (() => void) | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  try {
+    const pi = await loadPi()
+    const piConfig = await writePiConfig()
+    const modelRuntime = await pi.ModelRuntime.create({
+      authPath: piConfig.authPath,
+      modelsPath: piConfig.modelsPath,
+      allowModelNetwork: false,
+      refreshOnCreate: false
+    })
+    if (settings.apiKey) {
+      await modelRuntime.setRuntimeApiKey(settings.provider, settings.apiKey)
+    }
+    const model = settings.model ? modelRuntime.getModel(settings.provider, settings.model) : undefined
+
+    // A bare loader: the task text IS the system prompt, there are no skills to
+    // discover, no AGENTS.md to fold in, and nothing from the workspace to leak
+    // into a marking decision.
+    const LoaderCtor = pi.DefaultResourceLoader as unknown as new (opts: Record<string, unknown>) => {
+      reload: () => Promise<void>
+    }
+    const loader = new LoaderCtor({
+      cwd: process.cwd(),
+      agentDir: piConfig.agentDir,
+      systemPrompt: req.system,
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true
+    })
+    await loader.reload()
+
+    const sessionOpts: Record<string, unknown> = {
+      cwd: process.cwd(),
+      thinkingLevel: req.thinkingLevel ?? 'low',
+      modelRuntime,
+      resourceLoader: loader,
+      // Never on disk: a grading call is not a conversation to open or resume.
+      sessionManager: pi.SessionManager.inMemory(),
+      // The whole difference between "mark this answer" and "go edit the
+      // workspace" is whether the model is holding tools.
+      noTools: 'all'
+    }
+    if (model) sessionOpts.model = model
+    const created = await pi.createAgentSession(sessionOpts)
+    session = created.session as OneShotSession
+
+    // Prefer the stream, fall back to the stored message: `text_end` carries the
+    // whole block, `text_delta` arrives piecewise, and some providers do neither.
+    let streamed = ''
+    unsubscribe = session.subscribe((event) => {
+      const ame = event.assistantMessageEvent as { type?: string; delta?: string; content?: string } | undefined
+      if (!ame) return
+      if (ame.type === 'text_delta' && ame.delta) streamed += ame.delta
+      else if (ame.type === 'text_end' && typeof ame.content === 'string' && ame.content.length > streamed.length) {
+        streamed = ame.content
+      }
+    })
+
+    const timeoutMs = req.timeoutMs ?? ONE_SHOT_TIMEOUT_MS
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs)
+    })
+    const outcome = await Promise.race([
+      session.prompt(req.prompt).then(() => 'done' as const),
+      timedOut
+    ])
+    if (outcome === 'timeout') {
+      await session.abort().catch(() => undefined)
+      return fail(`no answer within ${Math.round(timeoutMs / 1000)}s`)
+    }
+
+    const text = (streamed || lastAssistantText(session.messages ?? [])).trim()
+    if (!text) return fail('the model returned nothing')
+    return { ok: true, text, elapsedMs: elapsed() }
+  } catch (err) {
+    return fail(String((err as Error)?.message ?? err))
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+    unsubscribe?.()
+    try {
+      session?.dispose()
+    } catch {
+      /* already torn down */
+    }
+  }
+}
+
 export async function startAgentSession(
   workspaceRoot: string,
   settings: AgentSettings,
@@ -210,6 +426,10 @@ export async function startAgentSession(
   // pi is fed from Yestion's own provider store (userData/agent/…): our
   // providers, our models, our keys. No catalog refresh, no ~/.pi dependency.
   const piConfig = await writePiConfig()
+  // Bundled extensions need to find Yestion's own auth.json/models.json (their
+  // default lookup is ~/.pi/agent), and must be on disk before the loader scans.
+  process.env.YESTION_AGENT_DIR = piConfig.agentDir
+  await seedAgentExtensions(piConfig.agentDir)
   const modelRuntime = await pi.ModelRuntime.create({
     authPath: piConfig.authPath,
     modelsPath: piConfig.modelsPath,
@@ -230,13 +450,38 @@ export async function startAgentSession(
   const skillDir = join(workspaceRoot, '.pi', 'skills', 'yestion')
   await fs.mkdir(skillDir, { recursive: true })
   const skillPath = join(skillDir, 'SKILL.md')
-  // Seed it once. The comment below the loader promised the user could tune
-  // this file, but it was being overwritten on every agent start, which threw
-  // away their edits (and any extra conventions they added).
+  // Seed it, and keep it current — but never silently overwrite a file the
+  // user has tuned. `.seed` records the hash of the text the app last wrote:
+  //   - hash matches (untouched since seeding) → safe to bring up to date;
+  //   - hash differs (the user edited it)      → leave it alone;
+  //   - no `.seed` (an install from before this scheme) → copy the old file to
+  //     SKILL.md.bak, then update, so a tuned copy is recoverable.
+  // The old behaviour overwrote the file on every start and threw away edits;
+  // the next behaviour seeded once and left a stale skill behind forever.
+  const seedPath = join(skillDir, '.seed')
+  const shippedHash = createHash('sha256').update(YESTION_SKILL_TEXT).digest('hex')
   try {
-    await fs.access(skillPath)
+    const existing = await fs.readFile(skillPath, 'utf-8')
+    let seedHash = ''
+    try {
+      seedHash = (await fs.readFile(seedPath, 'utf-8')).trim()
+    } catch {
+      // No seed record: an older install.
+    }
+    const existingHash = createHash('sha256').update(existing).digest('hex')
+    if (existingHash !== shippedHash) {
+      if (!seedHash) {
+        await fs.writeFile(`${skillPath}.bak`, existing, 'utf-8')
+        await fs.writeFile(skillPath, YESTION_SKILL_TEXT, 'utf-8')
+      } else if (seedHash === existingHash) {
+        await fs.writeFile(skillPath, YESTION_SKILL_TEXT, 'utf-8')
+      }
+      // Otherwise the user edited it — respect that.
+    }
+    await fs.writeFile(seedPath, shippedHash, 'utf-8')
   } catch {
     await fs.writeFile(skillPath, YESTION_SKILL_TEXT, 'utf-8')
+    await fs.writeFile(seedPath, shippedHash, 'utf-8')
   }
 
   const LoaderCtor = pi.DefaultResourceLoader as unknown as new (opts: {

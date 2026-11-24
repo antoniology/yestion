@@ -208,6 +208,12 @@
             <div id="editor-mount" class="editor-mount"></div>
             <div id="code-mount" class="code-mount" hidden></div>
           </div>
+          <!-- Sits outside .page-scroll so it stays put while the page scrolls.
+               It is a sibling of the scroll area rather than a float: nothing
+               else can overlap it, and it disappears with #page-view. -->
+          <div id="page-status" class="page-status">
+            <span id="word-count" class="word-count"></span>
+          </div>
         </div>
 
         <div id="pdf-pane" class="file-pane" hidden>
@@ -263,6 +269,12 @@
           </header>
           <div id="text-mount" class="text-mount"></div>
         </div>
+
+        <!-- The quiz runner owns this surface entirely: the paper header, the
+             questions and the results screen are all built by quiz-pane.ts. A
+             .qz is not a document the editor can round-trip, so none of the
+             page editor's mounts appear here. -->
+        <div id="quiz-pane" class="file-pane qz-pane" hidden></div>
 
         <div id="newtab-pane" class="newtab-pane" hidden>
           <div class="newtab-scroll">
@@ -561,6 +573,13 @@
           <div class="settings-row">
             <label for="settings-size">Size</label>
             <select id="settings-size"></select>
+          </div>
+          <div class="settings-row">
+            <label for="settings-counting">Counting</label>
+            <select id="settings-counting">
+              <option value="words">Words</option>
+              <option value="asian">Asian characters</option>
+            </select>
           </div>
         </section>
         <section class="settings-group">

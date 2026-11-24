@@ -1,9 +1,9 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><style>html,body{margin:0}</style></head><body>
 <script type="module">
-import * as pdfjsLib from '/Users/hacker/Applications/yestion/node_modules/pdfjs-dist/build/pdf.mjs'
+import * as pdfjsLib from '../node_modules/pdfjs-dist/build/pdf.mjs'
 const q = new URLSearchParams(location.search)
-const workerText = await (await fetch('/Users/hacker/Applications/yestion/node_modules/pdfjs-dist/build/pdf.worker.min.mjs')).text()
+const workerText = await (await fetch('../node_modules/pdfjs-dist/build/pdf.worker.min.mjs')).text()
 pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([workerText], { type: 'text/javascript' }))
 try {
   const bytes = new Uint8Array(await (await fetch('file://' + q.get('pdf'))).arrayBuffer())

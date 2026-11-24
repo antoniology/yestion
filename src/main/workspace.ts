@@ -15,7 +15,7 @@ export interface WorkspaceChild {
   path: string
   relPath: string // for pages: path to the .md; for folders: the dir
   dirRel?: string // directory containing this node
-  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   ext?: string
@@ -31,7 +31,7 @@ export interface WorkspacePage {
 }
 
 const TEXT_EXTENSIONS = new Set([
-  '.txt', '.text', '.log', '.md', '.markdown', '.json', '.jsonc', '.csv', '.tsv',
+  '.txt', '.text', '.log', '.md', '.markdown', '.qz', '.json', '.jsonc', '.csv', '.tsv',
   '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.env', '.properties',
   '.py', '.pyw', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.rb', '.go',
   '.rs', '.java', '.kt', '.c', '.h', '.cc', '.cpp', '.hpp', '.cs', '.swift',
@@ -41,8 +41,11 @@ const TEXT_EXTENSIONS = new Set([
   '.diff', '.patch', '.gitignore', '.editorconfig'
 ])
 
+export const QUIZ_ICON = '📝'
+
 function fileIcon(ext: string): string {
   if (ext === '.pdf') return '📕'
+  if (ext === '.qz') return QUIZ_ICON
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico'].includes(ext)) return '🖼'
   if (['.py', '.js', '.ts', '.tsx', '.jsx', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.sh', '.lua', '.php', '.sql'].includes(ext)) return '⌨️'
   if (['.json', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.csv', '.tsv'].includes(ext)) return '🧾'
@@ -185,6 +188,12 @@ async function buildChildren(root: string, dirRel: string): Promise<WorkspaceChi
       children.push({ name: e.name, path: join(abs, e.name), relPath: childRel, dirRel, kind: 'page', title: parsed.title, icon: parsed.icon })
     } else if (e.isFile() && extname(e.name).toLowerCase() === '.pdf') {
       children.push({ name: e.name, path: join(abs, e.name), relPath: childRel, dirRel, kind: 'pdf', title: e.name.replace(/\.pdf$/i, ''), icon: '📕', ext: '.pdf' })
+    } else if (e.isFile() && extname(e.name).toLowerCase() === '.qz') {
+      // A quiz is a leaf like a page — same front matter, so the same parser.
+      // This branch must stay above the generic isFile() arm below, which would
+      // otherwise file it as a plain 'file' and open it in the text viewer.
+      const parsed = parsePageFile(await fs.readFile(join(abs, e.name), 'utf-8'), e.name.replace(/\.[^.]+$/, ''))
+      children.push({ name: e.name, path: join(abs, e.name), relPath: childRel, dirRel, kind: 'quiz', title: parsed.title, icon: parsed.icon || QUIZ_ICON, ext: '.qz' })
     } else if (e.isFile()) {
       // Any other file: open text-like files in the built-in plaintext editor,
       // everything else with the system app.
@@ -204,7 +213,7 @@ async function buildChildren(root: string, dirRel: string): Promise<WorkspaceChi
     }
   }
   const rank = (k: WorkspaceChild['kind']): number =>
-    k === 'page' || k === 'folder' ? 0 : k === 'file' ? 1 : k === 'pdf' ? 2 : 3
+    k === 'page' || k === 'folder' || k === 'quiz' ? 0 : k === 'file' ? 1 : k === 'pdf' ? 2 : 3
   children.sort((a, b) => {
     const ka = rank(a.kind)
     const kb = rank(b.kind)
@@ -377,7 +386,8 @@ export async function searchWorkspace(root: string, query: string, limit = 60): 
   for (const f of files) {
     const nameMatch = f.name.toLowerCase().includes(q) || f.rel.toLowerCase().includes(q)
     const isMarkdown = /\.(md|markdown)$/i.test(f.name)
-    if (!isMarkdown) {
+    const isQuiz = /\.qz$/i.test(f.name)
+    if (!isMarkdown && !isQuiz) {
       if (nameMatch) {
         const ext = (f.name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase()
         // `kind` drives which viewer opens the hit, `icon` what the row shows.
@@ -403,6 +413,21 @@ export async function searchWorkspace(root: string, query: string, limit = 60): 
     }
     const fallback = basename(f.name).replace(/\.[^.]+$/, '')
     const page = parsePageFile(text, fallback)
+    if (isQuiz) {
+      // Name and title only. The body holds the answers, so searching it would
+      // put them in the ⌘⇧F snippet.
+      if (nameMatch || page.title.toLowerCase().includes(q)) {
+        nameHits.push({
+          relPath: f.rel,
+          title: page.title,
+          icon: page.icon || QUIZ_ICON,
+          kind: 'quiz',
+          line: 0,
+          snippet: ''
+        })
+      }
+      continue
+    }
     if (nameMatch) {
       nameHits.push({ relPath: f.rel, title: page.title, icon: page.icon, kind: 'page', line: 0, snippet: '' })
       continue
@@ -505,9 +530,9 @@ export async function listAllPages(root: string): Promise<{ relPath: string; tit
           out.push({ relPath: `${childRel}/${INDEX}`, title: parsed.title, icon: parsed.icon })
         }
         await walk(childRel)
-      } else if (e.isFile() && extname(e.name).toLowerCase() === '.md') {
+      } else if (e.isFile() && ['.md', '.qz'].includes(extname(e.name).toLowerCase())) {
         const parsed = parsePageFile(await fs.readFile(join(abs, e.name), 'utf-8'), e.name.replace(/\.[^.]+$/, ''))
-        out.push({ relPath: childRel, title: parsed.title, icon: parsed.icon })
+        out.push({ relPath: childRel, title: parsed.title, icon: parsed.icon || (extname(e.name).toLowerCase() === '.qz' ? QUIZ_ICON : '') })
       }
     }
   }

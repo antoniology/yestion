@@ -1,0 +1,4 @@
+CMU Serif (Computer Modern Unicode)
+Source: https://cm-unicode.sourceforge.io/ — via the `computer-modern` npm package.
+License: SIL Open Font License 1.1 — https://openfontlicense.org/
+These files are the web (woff2) builds of CMU Serif Roman, Italic, Bold and Bold Italic.

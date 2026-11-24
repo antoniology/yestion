@@ -17,13 +17,14 @@
 import { promises as fs } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { parsePageFile } from './frontmatter'
+import { QUIZ_ICON } from './workspace'
 
 export interface TreeNode {
   name: string
   path: string
   relPath: string
   dirRel?: string
-  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   ext?: string
@@ -37,6 +38,7 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.i
 
 function fileIcon(ext: string): string {
   if (ext === '.pdf') return '📕'
+  if (ext === '.qz') return QUIZ_ICON
   if (IMAGE_EXT.has(ext)) return '🖼'
   return '📄'
 }
@@ -87,6 +89,13 @@ interface ScannedPage {
   dirRel: string
   /** True for `…/index.md` (the folder is the page); false for loose `x.md`. */
   isIndex: boolean
+  /**
+   * True for a `.qz` paper. Quizzes scan as pages so that they appear in the
+   * links tree whether or not anything links them — the same rule markdown
+   * pages follow — but they are added to `byName` last, so a title collision
+   * resolves to the page.
+   */
+  isQuiz?: boolean
   /** Path of the page's markdown file, e.g. `Math/Trig/index.md`. */
   relPath: string
   abs: string
@@ -115,6 +124,7 @@ interface Scan {
 
 async function scanWorkspace(root: string): Promise<Scan> {
   const pages: ScannedPage[] = []
+  const quizPages: ScannedPage[] = []
   const files: ScannedFile[] = []
 
   const walk = async (dirRel: string, depth: number): Promise<void> => {
@@ -134,7 +144,7 @@ async function scanWorkspace(root: string): Promise<Scan> {
         continue
       }
       const ext = extname(e.name).toLowerCase()
-      if (ext === '.md' || ext === '.markdown') {
+      if (ext === '.md' || ext === '.markdown' || ext === '.qz') {
         const absFile = join(abs, e.name)
         let text = ''
         try {
@@ -142,20 +152,24 @@ async function scanWorkspace(root: string): Promise<Scan> {
         } catch {
           continue
         }
+        const isQuiz = ext === '.qz'
         const fallback = e.name.replace(/\.[^.]+$/, '')
         const parsed = parsePage(text, fallback)
         const isIndex = e.name.toLowerCase() === INDEX
-        pages.push({
+        const page: ScannedPage = {
           dirRel,
           isIndex,
+          isQuiz,
           relPath: childRel,
           abs: absFile,
           name: isIndex ? (dirRel.split('/').pop() || dirRel) : fallback,
           title: parsed.title,
-          icon: parsed.icon,
+          icon: parsed.icon || (isQuiz ? QUIZ_ICON : ''),
           links: extractPageLinks(parsed.body),
           fileLinks: extractFileLinks(parsed.body)
-        })
+        }
+        if (isQuiz) quizPages.push(page)
+        else pages.push(page)
       } else {
         files.push({
           dirRel,
@@ -170,9 +184,13 @@ async function scanWorkspace(root: string): Promise<Scan> {
   }
   await walk('', 0)
 
+  // Quizzes join last so that a title shared with a page resolves to the page —
+  // `byName` is first-wins.
+  pages.push(...quizPages)
+
   const byName = new Map<string, ScannedPage>()
   for (const p of pages) {
-    const keys = [p.title, p.name, basename(p.dirRel || p.relPath.replace(/\.md$/, ''))]
+    const keys = [p.title, p.name, basename(p.dirRel || p.relPath.replace(/\.(md|qz)$/, ''))]
     for (const k of keys) {
       const key = (k ?? '').trim().toLowerCase()
       if (key && !byName.has(key)) byName.set(key, p)
@@ -187,9 +205,9 @@ function pageNode(p: ScannedPage): TreeNode {
     path: p.abs,
     relPath: p.relPath,
     dirRel: p.isIndex ? p.dirRel : undefined,
-    kind: 'page',
+    kind: p.isQuiz ? 'quiz' : 'page',
     title: p.title,
-    icon: p.icon
+    icon: p.icon || (p.isQuiz ? QUIZ_ICON : '')
   }
 }
 
@@ -210,7 +228,7 @@ function fileNode(f: ScannedFile): TreeNode {
 function resolveLink(link: string, pages: Map<string, ScannedPage>, files: ScannedFile[]): ScannedPage | ScannedFile | null {
   const key = link.trim().toLowerCase()
   if (!key) return null
-  const bare = key.replace(/\.md$/, '')
+  const bare = key.replace(/\.(md|qz)$/, '')
   const byTitle = pages.get(key) ?? pages.get(bare)
   if (byTitle) return byTitle
   // `[[folder/sub/page]]` or `[[file.pdf]]`

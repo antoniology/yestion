@@ -1,4 +1,4 @@
-import { createRichEditor, dismissEditorFloats, localFileUrl, type RichEditor, type YestionPageOpts } from './wysiwyg'
+import { createRichEditor, dismissEditorFloats, localFileUrl, onEditorCountChange, readCounts, type RichEditor, type YestionPageOpts } from './wysiwyg'
 import { createEditor, type MarkdownEditor } from './editor'
 import { applyTheme, getTheme, nextTheme, THEMES } from './themes'
 import { fillFontSelect, fontById, printableStack } from './fonts'
@@ -12,6 +12,9 @@ import { anchorFloat, dismissFloats, installFloatDismissal, registerFloatCloser 
 import './styles.css'
 import { createPdfViewer, type PdfViewerHandle } from './pdf-viewer'
 import { createNewTabPane, type NewTabItem } from './newtab'
+import { createQuizPane } from './quiz-pane'
+import { parseQz } from './qz'
+import { countText, formatCount, type CountMode } from './word-count'
 
 // Fonts live in ./fonts.ts (shared with the settings modal).
 
@@ -59,14 +62,71 @@ const toggleSourceBtn = document.getElementById('toggle-source-btn') as HTMLButt
 const saveStatusEl = document.getElementById('save-status') as HTMLElement
 const workspaceNameEl = document.getElementById('workspace-name') as HTMLElement
 const pdfPaneEl = document.getElementById('pdf-pane') as HTMLElement
+const quizPaneEl = document.getElementById('quiz-pane') as HTMLElement
 const pdfViewEl = document.getElementById('pdf-view') as HTMLElement
 const imagePaneEl = document.getElementById('image-pane') as HTMLElement
 const imageViewEl = document.getElementById('image-view') as HTMLImageElement
 const imageStageEl = document.getElementById('image-stage') as HTMLElement
+const wordCountEl = document.getElementById('word-count') as HTMLElement
 
 // ---- state ----
 let currentPage: { relPath: string; absolutePath: string; title: string; icon: string; body: string; dirRel: string } | null = null
 let sourceMode = false
+
+// ---- word count ----
+// The mode is a display preference, not a property of the page: a student who
+// writes in Chinese sets it once and every page follows.
+let countMode: CountMode = 'words'
+/** The last text seen, kept so a mode change can repaint without re-reading. */
+let lastCountText = ''
+let lastCountSelection = ''
+
+function paintWordCount(text: string, selected: string): void {
+  lastCountText = text
+  lastCountSelection = selected
+  const total = countText(text, countMode)
+  // A collapsed caret is not a selection: it reports the page's own count.
+  const sel = selected === '' ? null : countText(selected, countMode)
+  wordCountEl.textContent = total === 0 && sel === null ? '' : formatCount(total, sel, countMode)
+}
+
+function setCountMode(mode: CountMode): void {
+  countMode = mode
+  paintWordCount(lastCountText, lastCountSelection)
+}
+
+/**
+ * Repaint from whichever surface is on screen.
+ *
+ * The rich editor's `setContent` runs with `emitUpdate: false`, so loading a
+ * page does not reach the listener above; this is what fills the footer on
+ * open, on a tab switch, and on a mode change.
+ *
+ * `ignoreSelection` is for a freshly loaded page: CodeMirror maps the old
+ * caret through a content swap, so the previous page's selection can survive
+ * as a range and would be reported against the new text.
+ */
+function refreshWordCount(ignoreSelection = false): void {
+  if (viewMode !== 'rich') {
+    const state = codeEditor.view.state
+    const { from, to } = state.selection.main
+    const selected = !ignoreSelection && from !== to ? state.sliceDoc(from, to) : ''
+    paintWordCount(state.doc.toString(), selected)
+    return
+  }
+  const counts = readCounts(richEditor)
+  paintWordCount(counts.text, ignoreSelection ? '' : counts.selected)
+}
+
+// Every rich editor reports here, including the split pane's — but the footer
+// sits under the page pane and describes *that* page, so the split editors are
+// ignored. In source view the markdown pane's own listener is the one that
+// must win, so nothing here may paint over it.
+onEditorCountChange((view, counts) => {
+  if (view !== richEditor.view) return
+  if (viewMode === 'source') return
+  paintWordCount(counts.text, counts.selected)
+})
 
 // ---- save state (queued, per page) ----
 // Editing bumps a revision for the page; a save job is an immutable snapshot of
@@ -290,6 +350,7 @@ function loadIntoEditors(markdown: string): void {
   loadedMarkdown = markdown
   docSource = 'loaded'
   lastSyncedMd = markdown
+  refreshWordCount(true)
 }
 
 function flushSplitSave(): void {
@@ -383,6 +444,32 @@ window.api.onWsExternalChange((rel) => {
   dropCachedPage(rel)
   void (async () => {
     await refreshTree()
+    // A quiz is neither a page nor a text file, so it needs its own branch —
+    // without this an agent editing an open paper leaves a stale runner on
+    // screen. Gated on the pane actually being up, so leaving it can't fire.
+    if (!quizPaneEl.hidden && currentQuizRel !== null && rel === currentQuizRel) {
+      const fresh = await window.api.wsRead(rel)
+      if (fresh) {
+        const body = fresh.body
+        const doc = parseQz(body)
+        if (doc.questions.length === 0) {
+          // The paper stopped parsing (an edit in the middle of a block, an
+          // external write that broke the file). Show the text rather than an
+          // empty runner.
+          await openTextFile(rel, { tab: false })
+        } else {
+          quizPane.render({
+            relPath: fresh.relPath,
+            title: fresh.title,
+            icon: fresh.icon,
+            body,
+            doc,
+            baseDir: fresh.absolutePath.replace(/\/[^/]*$/, '')
+          })
+        }
+      }
+      return
+    }
     if (currentFile && rel === currentFile.relPath && !fileDirty) {
       const fresh = await window.api.readTextFile(currentFile.relPath)
       if (fresh && textEditor) {
@@ -431,12 +518,24 @@ const richEditor: RichEditor = createRichEditor(richEditorEl, '', () => {
   schedulePrintPreview()
 }, pageOpts)
 
-const codeEditor: MarkdownEditor = createEditor(codeMount, '', getTheme('light').kind, () => {
-  if (programmatic) return
-  docSource = 'code'
-  if (sourceMode || viewMode === 'split') scheduleSave()
-  scheduleSplitSync()
-})
+const codeEditor: MarkdownEditor = createEditor(
+  codeMount,
+  '',
+  getTheme('light').kind,
+  () => {
+    if (programmatic) return
+    docSource = 'code'
+    if (sourceMode || viewMode === 'split') scheduleSave()
+    scheduleSplitSync()
+  },
+  // Source view counts the markdown it is showing, including its syntax. It is
+  // the text on screen, so it is the honest thing to report. Split view shows
+  // this pane too, and it is editable there, so it reports as well — whichever
+  // surface the user last touched owns the number.
+  (text, selected) => {
+    if (viewMode !== 'rich') paintWordCount(text, selected)
+  }
+)
 richEditorEl.addEventListener('focusin', flushSplitSync)
 codeMount.addEventListener('focusin', flushSplitSync)
 
@@ -465,14 +564,10 @@ async function openPageByRel(relPath: string, opts: { tab?: boolean } = {}): Pro
   savedRev.delete(page.relPath)
   setSaveStatus('')
   releasePdfViewer()
-  pdfPaneEl.hidden = true
-  // Every other opener hides the three viewers it isn't; this one used to
-  // leave an image pane on screen underneath the page that replaced it.
-  imagePaneEl.hidden = true
-  textPaneEl.hidden = true
-  newTabPane.hide()
+  // This one used to leave an image pane on screen underneath the page that
+  // replaced it, which is why the panes are now hidden in one place.
+  showOnlyPane(pageViewEl)
   currentFile = null
-  pageViewEl.hidden = false
   welcomeEl.hidden = true
   emptyStateEl.hidden = true
   pageLoaderEl.hidden = true
@@ -507,7 +602,7 @@ interface TabInfo {
   /** 'new' is a blank tab: it holds no file, only the landing page. Its
    *  relPath is a synthetic key (`__newtab__:…`) so the strip can still key
    *  tabs by path. */
-  kind: 'page' | 'pdf' | 'image' | 'file' | 'binary' | 'new'
+  kind: 'page' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz' | 'new'
   title: string
   icon?: string
   /** Remembered scroll position of this tab's content. */
@@ -604,6 +699,7 @@ function tabIconName(tab: TabInfo): IconName {
   if (tab.kind === 'image') return 'image'
   if (tab.kind === 'file') return fileIconName(tab.relPath)
   if (tab.kind === 'binary') return 'doc'
+  if (tab.kind === 'quiz') return 'quiz'
   return 'doc'
 }
 
@@ -827,6 +923,10 @@ function scrollForTab(tab: TabInfo): number | undefined {
 }
 
 async function loadTabContent(tab: TabInfo): Promise<void> {
+  // A tab restored from settings may carry a stale kind — older builds saved a
+  // `.qz` as a page before the runner existed. Opening it as a page is the
+  // destroy-the-file path, so the extension always wins.
+  if (tab.kind !== 'quiz' && /\.qz$/i.test(tab.relPath)) tab.kind = 'quiz'
   // A blank tab is a destination of its own, not a stop in the history: back
   // should step over it rather than land on an empty page.
   if (tab.kind !== 'new') recordNav({ rel: tab.relPath, kind: tab.kind, title: tab.title })
@@ -837,6 +937,7 @@ async function loadTabContent(tab: TabInfo): Promise<void> {
     else if (tab.kind === 'pdf') await openPdf(tab.relPath, { tab: false })
     else if (tab.kind === 'image') await openImage(tab.relPath, { tab: false })
     else if (tab.kind === 'file' || tab.kind === 'binary') await openTextFile(tab.relPath, { tab: false })
+    else if (tab.kind === 'quiz') await openQuiz(tab.relPath, { tab: false })
     else await openPageByRel(tab.relPath)
   } catch (err) {
     // A tab that can't be loaded must not wedge the app: report it and leave
@@ -888,11 +989,7 @@ function showNoTabs(): void {
   currentPdfPath = null
   pdfHandle?.destroy()
   pdfHandle = null
-  pageViewEl.hidden = true
-  pdfPaneEl.hidden = true
-  imagePaneEl.hidden = true
-  textPaneEl.hidden = true
-  newTabPane.hide()
+  showOnlyPane(null)
   welcomeEl.hidden = true
   pageLoaderEl.hidden = true
   emptyStateEl.hidden = false
@@ -906,6 +1003,10 @@ async function openRel(relIn: string, kind: string, asNewTab = false): Promise<v
     return
   }
   const rel = await normalizeRel(relIn)
+  // A `.qz` is always a quiz, whatever route got here (a first-page boot, a
+  // restored tab saved by an older build, a link). Loading one as a page puts
+  // its tags in the page editor, and one keystroke rewrites the file.
+  if (/\.qz$/i.test(rel)) kind = 'quiz'
   const existing = tabIndexFor(rel)
   if (existing >= 0 && !asNewTab) {
     if (existing !== activeTab) captureScrollForShownContent()
@@ -917,7 +1018,7 @@ async function openRel(relIn: string, kind: string, asNewTab = false): Promise<v
   }
   const displayKind = (kind === 'binary' ? 'binary' : kind) as TabInfo['kind']
   const info: TabInfo = { relPath: rel, kind: displayKind, title: rel.split('/').filter(Boolean).pop() ?? rel }
-  if (kind === 'page') {
+  if (kind === 'page' || kind === 'quiz') {
     const page = await window.api.wsRead(rel)
     if (page) {
       info.title = page.title
@@ -1032,6 +1133,34 @@ const newTabPane = createNewTabPane({
   searchWorkspace: () => openSearch()
 })
 
+const quizPane = createQuizPane()
+
+/** The .qz currently in the runner, or null. Derived state would be better,
+ *  but the external-change handler needs it before the pane is re-rendered. */
+let currentQuizRel: string | null = null
+
+/**
+ * Hide every content surface, then reveal the one that should be on screen.
+ *
+ * This used to be spelled out by hand at nine call sites, and the file carries
+ * the scar: the comment in `openPageByRel` records a page being painted over a
+ * leftover image pane. Adding a tenth pane to nine hand-written blocks leaves
+ * nine places to forget it, so the panes live in one list.
+ *
+ * `newTabPane` is a controller rather than an element. The welcome, empty,
+ * loader and locked surfaces are deliberately NOT handled here — they are not
+ * content panes and each call site wants different things from them.
+ */
+function showOnlyPane(el: HTMLElement | null): void {
+  pageViewEl.hidden = true
+  pdfPaneEl.hidden = true
+  imagePaneEl.hidden = true
+  textPaneEl.hidden = true
+  quizPaneEl.hidden = true
+  newTabPane.hide()
+  if (el) el.hidden = false
+}
+
 function showNewTab(): void {
   // The page we are leaving may have edits still queued; snapshot them before
   // the editor is swapped out from under the save queue.
@@ -1041,10 +1170,7 @@ function showNewTab(): void {
   currentImagePath = null
   currentPdfPath = null
   releasePdfViewer()
-  pageViewEl.hidden = true
-  pdfPaneEl.hidden = true
-  imagePaneEl.hidden = true
-  textPaneEl.hidden = true
+  showOnlyPane(null)
   welcomeEl.hidden = true
   emptyStateEl.hidden = true
   pageLoaderEl.hidden = true
@@ -1127,14 +1253,10 @@ async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Pr
   currentPage = null
   releasePdfViewer()
   currentFile = { relPath: pathOrRel2, absolutePath: res.absolutePath }
-  pageViewEl.hidden = true
-  pdfPaneEl.hidden = true
-  imagePaneEl.hidden = true
-  newTabPane.hide()
+  showOnlyPane(textPaneEl)
   emptyStateEl.hidden = true
   welcomeEl.hidden = true
   pageLoaderEl.hidden = true
-  textPaneEl.hidden = false
   const name = pathOrRel.split('/').pop() ?? pathOrRel
   textNameEl.textContent = name
   textNameEl.title = res.absolutePath
@@ -1161,9 +1283,74 @@ async function openTextFile(pathOrRel: string, opts: { tab?: boolean } = {}): Pr
   if (opts.tab !== false) upsertActiveTab({ relPath: pathOrRel, kind: 'file', title: name })
 }
 
+/**
+ * Open a `.qz` paper in the runner.
+ *
+ * The one thing this must never do is hand the file to the page editor. A `.qz`
+ * that reaches `loadTabContent`'s default arm opens as a *page*, and the first
+ * keystroke writes it back through `serializePageFile` as front matter plus a
+ * markdown body — the question blocks are destroyed, not merely mis-rendered.
+ * So `openQuiz` is dispatched explicitly and fails safe: a file that parses to
+ * no questions at all opens as plain text instead of as an empty runner.
+ */
+async function openQuiz(relPath: string, opts: { tab?: boolean } = {}): Promise<void> {
+  // Callers hand us either form — the tree passes a relPath, an in-page file
+  // chip passes an absolute one.
+  const rel = await normalizeRel(relPath)
+  recordNav({ rel, kind: 'quiz', title: rel })
+  if (fileDirty) await flushTextFile()
+  flushSave()
+  const seq = ++loadSeq
+  const page = await window.api.wsRead(rel)
+  if (seq !== loadSeq) return
+  if (!page) {
+    pageLoaderEl.hidden = true
+    return
+  }
+  const doc = parseQz(page.body)
+  if (doc.questions.length === 0) {
+    // Failing safe costs a worse view; failing open costs the paper.
+    await openTextFile(rel, { tab: opts.tab })
+    return
+  }
+
+  currentPage = null
+  currentFile = null
+  currentImagePath = null
+  currentPdfPath = null
+  releasePdfViewer()
+  showOnlyPane(quizPaneEl)
+  emptyStateEl.hidden = true
+  welcomeEl.hidden = true
+  pageLoaderEl.hidden = true
+  breadcrumbsEl.innerHTML = ''
+  const crumb = document.createElement('span')
+  crumb.className = 'crumb'
+  crumb.append(iconEl('quiz', 14), document.createTextNode(page.title))
+  breadcrumbsEl.appendChild(crumb)
+  ;(document.getElementById('crumb-bar') as HTMLElement).hidden = false
+  currentQuizRel = page.relPath
+  quizPane.render({
+    relPath: page.relPath,
+    title: page.title,
+    icon: page.icon,
+    body: page.body,
+    doc,
+    baseDir: page.absolutePath.replace(/\/[^/]*$/, '')
+  })
+  markActiveInTree(page.relPath)
+  if (opts.tab !== false) {
+    upsertActiveTab({ relPath: page.relPath, kind: 'quiz', title: page.title, icon: page.icon })
+  }
+}
+
 // Any in-page file reference (📎 chips, [text](file.pdf) links) opens in the
 // built-in viewers when the file lives in the workspace.
 async function openFileRef(absolutePath: string): Promise<void> {
+  // A .qz is text to `fileKind`, so it has to be caught by extension or it
+  // lands in the plaintext viewer — the one place a paper could be edited into
+  // a page.
+  if (/\.qz$/i.test(absolutePath)) return openQuiz(absolutePath)
   // Workspace-relative or absolute — both open in the built-in viewers; only
   // genuinely binary files go to the system app.
   const kind = await window.api.fileKind(absolutePath)
@@ -1228,12 +1415,8 @@ async function openPdf(pathOrRel: string, opts: { tab?: boolean } = {}): Promise
   }
   currentPage = null
   currentFile = null
-  textPaneEl.hidden = true
-  imagePaneEl.hidden = true
-  pageViewEl.hidden = true
-  newTabPane.hide()
+  showOnlyPane(pdfPaneEl)
   emptyStateEl.hidden = true
-  pdfPaneEl.hidden = false
   breadcrumbsEl.innerHTML = ''
   const crumb = document.createElement('span')
   crumb.className = 'crumb'
@@ -1318,12 +1501,8 @@ async function openImage(pathOrRel: string, opts: { tab?: boolean } = {}): Promi
   currentPage = null
   currentFile = null
   releasePdfViewer()
-  pdfPaneEl.hidden = true
-  textPaneEl.hidden = true
-  pageViewEl.hidden = true
-  newTabPane.hide()
+  showOnlyPane(imagePaneEl)
   emptyStateEl.hidden = true
-  imagePaneEl.hidden = false
   const nameEl = document.getElementById('image-name')
   if (nameEl) {
     nameEl.textContent = name
@@ -1390,6 +1569,9 @@ function applyViewMode(): void {
   } else {
     richEditor.focus()
   }
+  // The count follows the surface being looked at: source view counts the
+  // markdown, rich view counts what will be read.
+  refreshWordCount()
   // Merely switching modes must never dirty the page — only a body that differs
   // from what is on disk does.
   if (changed) scheduleSave()
@@ -1458,7 +1640,7 @@ interface SidebarNodeLike {
   dirRel?: string
   // Must cover every kind the main process can emit (see workspace.ts) —
   // 'image' was missing here and in the preload type.
-  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   children?: SidebarNodeLike[]
@@ -2640,6 +2822,19 @@ function initPrintHost(): void {
     } finally {
       programmatic = false
     }
+    // The reading font is applied to the page by the @media print rule, so it
+    // is never referenced on screen here — and `document.fonts.ready` would
+    // resolve without it, leaving printToPDF to fall back to Times. Load the
+    // primary family explicitly before printing.
+    const primary = doc.font.split(',')[0].trim().replace(/^['"]|['"]$/g, '')
+    if (primary) {
+      await Promise.all([
+        document.fonts.load(`16px "${primary}"`),
+        document.fonts.load(`bold 16px "${primary}"`),
+        document.fonts.load(`italic 16px "${primary}"`),
+        document.fonts.load(`bold italic 16px "${primary}"`)
+      ]).catch(() => undefined)
+    }
     await document.fonts.ready
     await nextPaint()
     // The images are new to this window: printToPDF would leave out any that
@@ -2863,6 +3058,13 @@ function closeSplit(): void {
 }
 
 async function setSplitTarget(rel: string, kind: string, title?: string): Promise<void> {
+  // The split pane is a rich-text editor bound to `wsSave`, so a paper put
+  // there would be parsed as a page and written back as one. Refused rather
+  // than approximated — the main pane is the only place a .qz runs.
+  if (kind === 'quiz') {
+    console.warn('[yestion] refusing to split a quiz file:', rel)
+    return
+  }
   // Picking something else in that pane means leaving the print preview.
   printPreviewOn = false
   splitBodyEl.classList.remove('print-preview')
@@ -3300,6 +3502,7 @@ function searchIconName(hit: SearchHit): IconName {
   if (hit.kind === 'pdf') return 'doc'
   if (hit.kind === 'image') return 'image'
   if (hit.kind === 'file') return fileIconName(hit.relPath)
+  if (hit.kind === 'quiz') return 'quiz'
   return 'doc'
 }
 
@@ -3567,10 +3770,11 @@ function renderOutline(): void {
   }
   let minLevel = 9
   for (const h of headings) minLevel = Math.min(minLevel, Number(h.tagName[1]))
-  // Two levels is what fits a sidebar; anything deeper is noise when you are
-  // trying to get somewhere. Listing h1–h4 swamped the panel on a long page.
-  const shown = headings.filter((h) => Number(h.tagName[1]) <= minLevel + 1)
-  for (const h of shown) {
+  // Indent by depth, but never hide by depth. The old "two levels below the
+  // page's shallowest heading" rule silently dropped whole sections on a page
+  // that mixes habits — a sheet whose body is ###/#### and which later gains a
+  // single # showed only that # and the ##s under it.
+  for (const h of headings) {
     const level = Number(h.tagName[1])
     const row = document.createElement('button')
     row.type = 'button'
@@ -3633,11 +3837,10 @@ async function initWorkspace(): Promise<void> {
     recentItems = []
   }
   if (!base) {
+    showOnlyPane(null)
     welcomeEl.hidden = false
-    pageViewEl.hidden = true
     emptyStateEl.hidden = true
     pageLoaderEl.hidden = true
-    newTabPane.hide()
     return
   }
   const info = await window.api.wsGet()
@@ -3651,13 +3854,9 @@ async function initWorkspace(): Promise<void> {
     const lockedView = document.getElementById('locked-view') as HTMLElement
     ;(document.getElementById('locked-title') as HTMLElement).textContent = info.displayPath.split('/').pop()?.replace(/^\./, '').replace(/\.yestion$/, '') || 'Private workspace'
     lockedView.hidden = false
+    showOnlyPane(null)
     welcomeEl.hidden = true
-    pageViewEl.hidden = true
     emptyStateEl.hidden = true
-    pdfPaneEl.hidden = true
-    imagePaneEl.hidden = true
-    textPaneEl.hidden = true
-    newTabPane.hide()
     pageLoaderEl.hidden = true
     workspaceNameEl.textContent = (info.displayPath.split('/').pop() ?? '').replace(/^\./, '').replace(/\.yestion$/, '')
     return
@@ -3702,7 +3901,7 @@ async function initWorkspace(): Promise<void> {
     if (!restored && firstRel) {
       await openRel(firstRel, 'page')
     } else if (!restored) {
-      pageViewEl.hidden = true
+      showOnlyPane(null)
       emptyStateEl.hidden = false
     }
   } finally {
@@ -3711,7 +3910,7 @@ async function initWorkspace(): Promise<void> {
 }
 
 function findFirstPage(node: { kind: string; relPath: string; children?: unknown[] }): string | null {
-  if (node.kind === 'page') return node.relPath
+  if (node.kind === 'page' || node.kind === 'quiz') return node.relPath
   for (const child of (node.children ?? []) as { kind: string; relPath: string; children?: unknown[] }[]) {
     const found = findFirstPage(child)
     if (found) return found
@@ -3762,6 +3961,7 @@ async function init(): Promise<void> {
   setTheme(savedTheme)
   applyPreviewFont(res.previewFont ?? 'default')
   applyRenderSize(setting('renderFontSize', 'm'))
+  setCountMode(setting<CountMode>('wordCountMode', 'words') === 'asian' ? 'asian' : 'words')
   const previewBtn = document.getElementById('page-mode-btn')
   if (previewBtn) previewBtn.textContent = 'Preview'
   // Older builds stored the paper's title/icon switches separately
@@ -4045,7 +4245,8 @@ async function init(): Promise<void> {
     onWorkspaceChanged: () => void initWorkspace(),
     onAgentSettingsChanged: () => void agentApi.restart(),
     onThemeChange: (id) => setTheme(id),
-    onFontChange: (id) => applyPreviewFont(id)
+    onFontChange: (id) => applyPreviewFont(id),
+    onCountModeChange: (mode) => setCountMode(mode)
   })
   restartAgentPanel = () => agentApi.restart()
   // First run: ask for one endpoint + key + model, then wire the agent to it.
@@ -4073,7 +4274,10 @@ async function init(): Promise<void> {
       else if (action === 'reveal') await window.api.revealPath(relPath)
       else if (action === 'copy-path') await window.api.copyPath(relPath)
       else if (action === 'copy-link') {
-        const title = kind === 'page' ? (await window.api.wsRead(relPath))?.title ?? relPath : relPath
+        const title =
+          kind === 'page' || kind === 'quiz'
+            ? (await window.api.wsRead(relPath))?.title ?? relPath
+            : relPath
         await navigator.clipboard.writeText('[[' + title + ']]')
       } else if (action === 'close-tab') {
         const i = tabs.findIndex((t) => t.relPath === relPath)

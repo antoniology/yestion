@@ -1,5 +1,7 @@
 import MarkdownIt from 'markdown-it'
 import katex from 'katex'
+import { relaxCjkEmphasis } from './emphasis'
+import { repairTables } from './tables'
 
 // Full markdown rendering for agent replies: headings, lists, tables, quotes,
 // code fences, links, and KaTeX math ($…$ inline, $$…$$ display) — the same
@@ -80,9 +82,9 @@ md.block.ruler.before('fence', 'agent_math_block', (state, startLine, endLine, s
 md.renderer.rules.agent_math_block = (tokens, idx) => renderMath(tokens[idx].content, true)
 
 export function renderAgentMarkdown(source: string): string {
-  return md.render(source ?? '')
+  return md.render(repairTables(relaxCjkEmphasis(source ?? '')))
 }
 
 export function renderAgentInline(source: string): string {
-  return md.renderInline(source ?? '')
+  return md.renderInline(repairTables(relaxCjkEmphasis(source ?? '')))
 }

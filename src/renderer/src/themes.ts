@@ -42,7 +42,9 @@ export const THEMES: ThemeDef[] = [
     label: 'Dark (Terminal)',
     kind: 'dark',
     vars: {
-      '--bg': '#1e1e1e',
+      // The shell is darker than the page: #1e1e1e on #1e1e1e made the
+      // navigation, the AI panel and the paper one flat block.
+      '--bg': '#141414',
       '--panel-bg': '#1e1e1e',
       '--text': '#d4d4d4',
       '--muted': '#9d9d9d',
@@ -73,7 +75,9 @@ export const THEMES: ThemeDef[] = [
     label: 'Dark (GitHub)',
     kind: 'dark',
     vars: {
-      '--bg': '#1f2328',
+      // GitHub's own dark canvas: near-black shell (#010409) with #0d1117
+      // cards. #1f2328 read as grey next to the real thing.
+      '--bg': '#010409',
       '--panel-bg': '#0d1117',
       '--text': '#e6edf3',
       '--muted': '#9198a1',
@@ -322,8 +326,11 @@ function deriveTokens(v: Record<string, string>): Record<string, string> {
     '--text-2': text,
     '--muted-2': muted,
     '--muted-3': mixHex(muted, panel, 0.45),
+    // The two side panels are one surface. They used to be derived
+    // independently, so a theme could give the navigator and the agent panel
+    // two different tints — which read as a mistake, not as hierarchy.
     '--sidebar-bg': bg,
-    '--agent-bg': isDark ? clear(bg) : mixHex(bg, panel, 0.5),
+    '--agent-bg': bg,
     '--surface-elevated': panel,
     '--hover-bg': rgba(text, 0.045),
     '--active-bg': rgba(text, 0.075),

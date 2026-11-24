@@ -2,7 +2,7 @@ export interface WorkspaceChild {
   name: string
   path: string
   relPath: string
-  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary'
+  kind: 'page' | 'folder' | 'pdf' | 'image' | 'file' | 'binary' | 'quiz'
   title?: string
   icon?: string
   children?: WorkspaceChild[]
@@ -111,6 +111,9 @@ export interface Api {
   wsTree: () => Promise<WorkspaceChild>
   wsConvertLoose: (relPath: string) => Promise<string>
   wsRead: (relPath: string) => Promise<WorkspacePage | null>
+  quizAttemptLoad: (relPath: string) => Promise<string | null>
+  quizAttemptSave: (relPath: string, data: string) => Promise<boolean>
+  quizAttemptClear: (relPath: string) => Promise<boolean>
   wsSearch: (query: string) => Promise<
     { relPath: string; title: string; icon: string; kind: string; line: number; snippet: string }[]
   >
@@ -138,6 +141,13 @@ export interface Api {
   agentPrompt: (text: string, context?: { title: string; relPath: string } | null, images?: { data: string; mimeType: string }[]) => Promise<void>
   agentAbort: () => Promise<void>
   agentStop: () => Promise<void>
+  /** One-shot model call: no tools, no session file, no trace in the panel. */
+  agentOneshot: (req: {
+    system: string
+    prompt: string
+    timeoutMs?: number
+    thinkingLevel?: string
+  }) => Promise<{ ok: boolean; text: string; error?: string; elapsedMs: number }>
   agentModels: () => Promise<
     { provider: string; providerName: string; id: string; name: string; contextWindow: number }[]
   >
@@ -147,6 +157,14 @@ export interface Api {
   onAgentEvent: (callback: (event: unknown) => void) => () => void
   onAgentStarted: (callback: (payload: { model: string; contextWindow?: number | null }) => void) => () => void
   onAgentStopped: (callback: () => void) => () => void
+  onAgentInjectedPrompt: (callback: (text: string) => void) => () => void
+  onAgentInjectedDone: (callback: () => void) => () => void
+  agentGradeQuiz: (req: {
+    relPath: string
+    system: string
+    prompt: string
+    timeoutMs?: number
+  }) => Promise<{ ok: boolean; text: string; error?: string; elapsedMs: number }>
 
   getSettings: <K extends string>(key: K) => Promise<unknown>
   getSettingsAll: () => Promise<Record<string, unknown>>

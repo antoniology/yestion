@@ -2,6 +2,38 @@
   box-sizing: border-box;
 }
 
+/* Computer Modern (CMU Serif), the face a LaTeX paper is set in. Bundled so it
+   is available on any machine and can be embedded in an exported PDF; the
+   weights map 500→400 and 700→700 because the family ships two static weights. */
+@font-face {
+  font-family: 'CMU Serif';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/computer-modern/cmu-serif-roman.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'CMU Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/computer-modern/cmu-serif-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'CMU Serif';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./assets/fonts/computer-modern/cmu-serif-bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'CMU Serif';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./assets/fonts/computer-modern/cmu-serif-bolditalic.woff2') format('woff2');
+}
+
 /* The hidden attribute must win over any display rule. */
 [hidden] {
   display: none !important;
@@ -1096,6 +1128,28 @@ body.resizing-h {
   overflow-y: auto;
 }
 
+/* The page footer. It sits on the paper with no rule above it and no fill of
+   its own — the same treatment the rest of the chrome gets — so it reads as a
+   quiet aside rather than another bar. */
+.page-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 28px;
+  padding: 0 26px 6px;
+  pointer-events: none;
+}
+
+.word-count {
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--muted-3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  white-space: nowrap;
+}
+
 .page-header {
   max-width: 880px;
   margin: 0 auto;
@@ -1721,6 +1775,40 @@ body.resizing-h {
 .markdown-body th {
   font-weight: 600;
   background: transparent;
+}
+
+/* Table styles chosen from the table toolbar. */
+.markdown-body table[data-table-style='borderless'] th,
+.markdown-body table[data-table-style='borderless'] td {
+  border: none;
+}
+
+/* LaTeX: one rule, between the header and the body — nothing else. */
+.markdown-body table[data-table-style='latex'] th,
+.markdown-body table[data-table-style='latex'] td {
+  border: none;
+}
+.markdown-body table[data-table-style='latex'] th {
+  border-bottom: 1px solid var(--text);
+}
+
+/* Editing guides. Faint dashed grid while the caret is in the table and the
+   editor has focus; it disappears when you click away, leaving the chosen
+   style (for LaTeX: the single rule above; for borderless: nothing). */
+.tiptap:focus-within table[data-editing='true'][data-table-style='latex'] th,
+.tiptap:focus-within table[data-editing='true'][data-table-style='latex'] td,
+.tiptap:focus-within table[data-editing='true'][data-table-style='borderless'] th,
+.tiptap:focus-within table[data-editing='true'][data-table-style='borderless'] td {
+  border: 1px dashed color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+/* The header row is always the table's heading. Choosing the left column adds
+   weight there too; it never takes the heading row's emphasis away. */
+.markdown-body table[data-bold-axis='column'] th {
+  font-weight: 600;
+}
+.markdown-body table[data-bold-axis='column'] td:first-child {
+  font-weight: 600;
 }
 
 .markdown-body hr {
@@ -3609,6 +3697,7 @@ body.resizing-h {
   .tab-bar,
   .topbar,
   #top-command,
+  .page-status,
   #crumb-bar,
   .crumb-bar,
   .page-hover-actions,
@@ -6060,6 +6149,19 @@ code {
   backdrop-filter: var(--glass-blur);
 }
 
+/* Style and bold-axis pickers sit in the table toolbar beside its buttons. */
+.table-tool-select {
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
 /* ---- the type scale ---- */
 .page-title {
   font-size: calc(var(--t-title) * var(--render-font-scale, 1));
@@ -6249,13 +6351,26 @@ code {
 }
 
 /* The page's own icon, above its title. An emoji the user picked renders at
-   the 68px below; the line-art fallback for a page with no icon is quieter and
+   the 56px below; the line-art fallback for a page with no icon is quieter and
    smaller, and is a glyph rather than the 📄 the app used to hardcode — which
    read as a default, not as "no icon set". */
 .page-icon {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  width: fit-content;
+  min-width: 0;
+  min-height: 0;
+  padding: 6px;
+  margin-left: -6px;
+  margin-bottom: 2px;
+  font-size: 56px;
+  line-height: 1.1;
+  border-radius: var(--r-md);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .page-icon:not(.is-emoji) {
@@ -6285,4 +6400,1299 @@ code {
 /* The empty agent panel's mark, in place of the ✨ that used to sit here. */
 .agent-empty-icon {
   color: var(--muted-3);
+}
+
+/* ===========================================================================
+   Notion-inspired UI & motion polish
+   ---------------------------------------------------------------------------
+   Minimalist surfaces, consistent 24 / 28 / 32 control rhythm, whisper-soft
+   multi-layered elevations (with zero chrome hairlines), and tight, natural
+   micro-interactions across the sidebar, tabs, editor canvas, menus, and agent
+   panel.
+   =========================================================================== */
+
+:root {
+  /* Snappier, tighter Notion / Apple-grade motion tokens */
+  --dur-micro: 90ms;
+  --dur-fast: 140ms;
+  --dur: 200ms;
+  --dur-slow: 260ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  /* Multi-stage ambient shadows (no 1px outlines) */
+  --shadow-sm:
+    0 1px 2px rgba(15, 15, 14, 0.04),
+    0 2px 6px rgba(15, 15, 14, 0.025);
+  --shadow-md:
+    0 4px 14px -2px rgba(15, 15, 14, 0.07),
+    0 2px 5px -1px rgba(15, 15, 14, 0.04);
+  --shadow-popover:
+    0 12px 32px -4px rgba(15, 15, 14, 0.14),
+    0 4px 12px -2px rgba(15, 15, 14, 0.07);
+  --shadow-lg:
+    0 24px 56px -8px rgba(15, 15, 14, 0.20),
+    0 8px 20px -4px rgba(15, 15, 14, 0.08);
+  --shadow-focus: 0 0 0 2.5px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+/* ---- Unified interactive transition beat ---- */
+.btn,
+.ghost-btn,
+.icon-btn,
+.tc-toggle,
+.tc-pill,
+.tab,
+.tab-add,
+.tab-close,
+.crumb-btn,
+.topbar-select,
+.page-action-btn,
+.ws-menu-item,
+.ws-menu-action,
+.crumb-pop-item,
+.agent-recent-item,
+.agent-recent-new,
+.slash-item,
+.agent-slash-item,
+.page-picker-item,
+.search-hit,
+.split-picker-row,
+.emoji-grid button,
+.emoji-tab,
+.sidebar-header-plus,
+.tree-item,
+.tree-folder > summary,
+.sidebar-section > summary,
+.oe-row,
+.outline-row,
+.new-page-btn,
+.export-seg-btn,
+.ob-chip,
+.agent-chip,
+.agent-group-head,
+.table-tool-btn,
+.find-btn {
+  transition-property: background-color, color, opacity, transform, box-shadow;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease);
+}
+
+/* Immediate tactile press feedback on interactive rows and buttons (excluding
+   tabs so ⌘1–9 and rapid tab clicks stay rock-steady) */
+.btn:active:not(:disabled),
+.ghost-btn:active:not(:disabled),
+.icon-btn:active:not(:disabled),
+.tc-toggle:active:not(:disabled),
+.tc-pill:active:not(:disabled),
+.page-action-btn:active:not(:disabled),
+.sidebar-header-plus:active,
+.ws-menu-item:active,
+.ws-menu-action:active,
+.crumb-pop-item:active,
+.agent-recent-item:active,
+.slash-item:active,
+.agent-slash-item:active,
+.page-picker-item:active,
+.search-hit:active,
+.split-picker-row:active,
+.emoji-grid button:active,
+.newtab-action:active,
+.newtab-row:active,
+.new-page-btn:active,
+.agent-chip:active,
+.ob-chip:active {
+  transform: scale(0.98);
+}
+
+.tab:active {
+  transform: none;
+}
+
+/* ---- Tighter, weightless popover & modal transitions ---- */
+.highlight-popup,
+.math-editor-popup,
+.table-size-picker {
+  animation: none;
+}
+
+:is(
+    .crumb-pop, .ws-menu, .slash-menu, .agent-slash-menu, .emoji-picker,
+    .agent-recent-pop, .export-menu, .page-view-menu,
+    .table-size-picker, .table-toolbar, .highlight-popup, .math-editor-popup
+  )[hidden] {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
+  pointer-events: none;
+  transition-duration: var(--dur-micro);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  :is(
+      .crumb-pop, .ws-menu, .slash-menu, .agent-slash-menu, .emoji-picker,
+      .agent-recent-pop, .export-menu, .page-view-menu,
+      .table-size-picker, .table-toolbar, .highlight-popup, .math-editor-popup
+    ) {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.page-picker[hidden] {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-4px) scale(0.98);
+  pointer-events: none;
+  transition-duration: var(--dur-micro);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .page-picker {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px) scale(0.975);
+  }
+}
+
+.find-bar[hidden] {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+  pointer-events: none;
+  transition-duration: var(--dur-micro);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .find-bar:not([hidden]) {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+}
+
+.modal-backdrop[hidden] .modal,
+.modal-backdrop[hidden] .search-panel,
+.search-modal[hidden] .search-panel {
+  opacity: 0;
+  transform: translateY(6px) scale(0.98);
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-in);
+}
+
+@starting-style {
+  .modal-backdrop:not([hidden]) .modal,
+  .modal-backdrop:not([hidden]) .search-panel,
+  .search-modal:not([hidden]) .search-panel {
+    opacity: 0;
+    transform: translateY(8px) scale(0.975);
+  }
+}
+
+/* Subtle panel slide-ins (12px instead of 64px so toggling panes feels crisp) */
+@keyframes y-slide-in-left {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes y-slide-in-right {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+#sidebar:not([hidden]) {
+  animation: y-slide-in-left var(--dur) var(--ease) both;
+}
+
+#agent-panel:not([hidden]),
+#split-right:not([hidden]) {
+  animation: y-slide-in-right var(--dur) var(--ease) both;
+}
+
+/* Smooth page & file view fade-in when switching views */
+@keyframes y-view-fade {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+
+.welcome-card {
+  animation: y-view-fade var(--dur-slow) var(--ease) both;
+}
+
+/* Smooth disclosure expansion for sidebar sections, folders, and agent groups */
+.tree-folder > summary::before,
+.tree-toggle,
+.sidebar-section > summary::before,
+.agent-caret,
+.chev,
+.crumb-pop-chev {
+  transition:
+    transform var(--dur) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+@keyframes y-disclosure-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+.tree-folder[open] > :not(summary),
+.agent-group[data-open='true'] .agent-group-body {
+  animation: y-disclosure-in var(--dur-fast) var(--ease) both;
+}
+
+/* ---- Sidebar: Notion-like clean geometry & alignment ---- */
+.sidebar-scroll {
+  padding: 8px 8px 10px;
+  gap: 6px;
+}
+
+.sidebar-section > summary {
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: var(--t-label);
+  font-weight: 500;
+  letter-spacing: var(--tr-label);
+}
+
+.sidebar-section > summary:hover {
+  background: var(--hover-bg);
+  color: var(--text-2);
+}
+
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 6px 8px;
+}
+
+.sidebar-search {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  font-size: var(--t-ui);
+  color: var(--text);
+}
+
+.sidebar-search:hover {
+  background: var(--field-line);
+}
+
+.sidebar-search:focus {
+  background: var(--paper);
+  box-shadow: var(--shadow-focus);
+}
+
+.page-tree,
+.open-editors,
+.page-outline {
+  padding: 0 2px 4px 4px;
+}
+
+.tree-item,
+.tree-folder > summary,
+.oe-row,
+.outline-row {
+  min-height: 28px;
+  padding: 3px 8px;
+  margin: 0.5px 0;
+  border-radius: var(--r-sm);
+  gap: 7px;
+  font-size: var(--t-ui);
+  font-weight: 450;
+  color: var(--text-2);
+}
+
+.oe-row {
+  padding-left: 10px;
+}
+
+.tree-item:hover,
+.tree-folder > summary:hover,
+.oe-row:hover,
+.outline-row:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.tree-item.active,
+.oe-row.current {
+  background: var(--active-bg);
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* Reset .new-page-btn to a calm Notion footer row instead of a heavy bold card */
+.sidebar-footer {
+  padding: 6px 8px 10px;
+  gap: 4px;
+}
+
+.new-page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  box-shadow: none;
+  font-size: var(--t-ui);
+  font-weight: 500;
+  letter-spacing: normal;
+  color: var(--muted-2);
+  text-align: left;
+}
+
+.new-page-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+  box-shadow: none;
+  transform: none;
+}
+
+.footer-icons .icon-btn,
+.sidebar-actions .icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+
+/* ---- Top chrome, tabs & breadcrumbs (24 / 28 / 32 scale) ---- */
+.top-command {
+  min-height: 38px;
+  padding: 6px 14px 2px;
+}
+
+.top-command .tc-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+}
+
+.top-command .tc-pill {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-ui);
+  font-weight: 500;
+}
+
+.tab-bar {
+  padding: 2px 12px;
+  gap: 3px;
+}
+
+.tab {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-ui);
+  font-weight: 450;
+  color: var(--muted-2);
+}
+
+.tab:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--field-bg);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: var(--r-xs);
+  opacity: 0;
+}
+
+.tab:hover .tab-close,
+.tab.active .tab-close {
+  opacity: 0.65;
+}
+
+.tab-close:hover {
+  opacity: 1;
+  background: var(--hover-bg);
+  color: var(--danger);
+}
+
+.tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+
+.crumb-bar {
+  min-height: 32px;
+  padding: 2px 14px 6px;
+}
+
+.crumb-btn,
+.crumb-right > .ghost-btn,
+.crumb-right > .topbar-select {
+  height: 24px;
+  padding: 0 7px;
+  border-radius: var(--r-xs);
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--t-label);
+}
+
+.crumb-btn.current {
+  font-weight: 500;
+}
+
+/* ---- Page header & Notion editor canvas ---- */
+.page-header {
+  padding: 56px 88px 4px;
+}
+
+.page-hover-actions {
+  top: 20px;
+  right: 88px;
+  gap: 4px;
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.page-header:hover .page-hover-actions,
+.page-header:focus-within .page-hover-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-action-btn {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  font-size: var(--t-label);
+  color: var(--muted);
+}
+
+.page-action-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.page-icon:hover {
+  background: var(--hover-bg);
+  transform: scale(1.03);
+}
+
+.page-title {
+  margin: 6px 0 2px;
+  line-height: 1.18;
+  caret-color: var(--cursor);
+}
+
+.markdown-body {
+  line-height: var(--lh-body);
+}
+
+.markdown-body h1 {
+  font-size: 1.75em;
+  font-weight: 680;
+  letter-spacing: var(--tr-h1);
+  margin: 1.4em 0 0.35em;
+}
+
+.markdown-body h2 {
+  font-size: 1.4em;
+  font-weight: 640;
+  letter-spacing: var(--tr-h2);
+  margin: 1.2em 0 0.3em;
+}
+
+.markdown-body h3 {
+  font-size: 1.18em;
+  font-weight: 620;
+  letter-spacing: -0.008em;
+  margin: 1em 0 0.25em;
+}
+
+.markdown-body p {
+  margin: 0.3em 0;
+}
+
+.markdown-body blockquote {
+  margin: 0.55em 0;
+  padding: 0.15em 0 0.15em 1em;
+  border-left: 3px solid color-mix(in srgb, var(--text) 78%, transparent);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.markdown-body pre {
+  background: var(--field-bg);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+}
+
+.markdown-body :not(pre) > code {
+  background: var(--field-bg);
+  padding: 0.15em 0.38em;
+  border-radius: var(--r-xs);
+  font-size: 0.85em;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 6px 10px;
+  transition: background-color var(--dur-micro) var(--ease);
+}
+
+.markdown-body tr:hover td {
+  background-color: color-mix(in srgb, var(--text) 1.8%, transparent);
+}
+
+.markdown-body .todo-box {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.markdown-body .todo-content {
+  transition:
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+/* ---- Menus, Slash Picker & Search Rows ---- */
+.slash-item:hover,
+.slash-item.active,
+.agent-slash-item:hover,
+.agent-slash-item.active,
+.page-picker-item:hover,
+.page-picker-item.active,
+.search-hit:hover,
+.search-hit.active,
+.split-picker-row:hover {
+  background: var(--hover-bg);
+}
+
+.slash-item-icon {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.slash-item:hover .slash-item-icon,
+.slash-item.active .slash-item-icon {
+  background: var(--field-line);
+  color: var(--text);
+  transform: scale(1.04);
+}
+
+/* ---- Agent Panel: calm surfaces & fluid message arrivals ---- */
+@keyframes y-msg-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.agent-row,
+.agent-turn {
+  animation: y-msg-in var(--dur) var(--ease) both;
+}
+
+.agent-composer {
+  background: var(--field-bg);
+  border-radius: var(--r-lg);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.agent-composer:focus-within {
+  background: var(--paper);
+  box-shadow: var(--shadow-focus);
+}
+
+.agent-new-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-label);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-card,
+  .tree-folder[open] > :not(summary),
+  .agent-group[data-open='true'] .agent-group-body,
+  .agent-row,
+  .agent-turn {
+    animation: none;
+  }
+}
+
+/* ============================================================
+   The .qz runner
+
+   A quiz pane is its own surface: a .qz is not a document the page editor can
+   round-trip, so none of the page markup appears in it and none of the page CSS
+   comes with it. Only the shared tokens and the type scale are reused.
+
+   It scrolls in `.qz-scroll`, never `.page-scroll` — main.ts runs an unscoped
+   `document.querySelector('.page-scroll')` in two places, and a second one in
+   the DOM is an ordering bug waiting to happen.
+   ============================================================ */
+
+.qz-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--paper);
+  padding: 0 88px 120px;
+}
+
+/* One paper column, the same measure the editor uses, so a quiz and a page
+   read as the same size of paper. */
+.qz-scroll > * {
+  max-width: 880px;
+  margin-inline: auto;
+}
+
+/* The bar doubles as the running head: it carries the clock and the submit
+   button, so it stays put while the paper scrolls under it. It floats on the
+   paper fill rather than sitting behind a rule. */
+.qz-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 28px 0 18px;
+  background: var(--paper);
+}
+
+.qz-bar-spacer { flex: 1; }
+
+.qz-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.qz-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: var(--field-bg);
+  color: var(--muted-2);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.qz-titles { min-width: 0; }
+
+.qz-title {
+  margin: 0;
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.qz-meta {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* ---------- buttons ---------- */
+
+/* Fields are told apart by their fill, never an outline, so the fill is also
+   what carries hover — and it has to move further than the resting fill or the
+   state is invisible. */
+.qz-btn {
+  appearance: none;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.qz-btn:hover { background: var(--active-bg); }
+.qz-btn:active { background: var(--selected-bg); }
+
+.qz-btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.qz-btn-primary:hover { background: #1f52aa; }
+.qz-btn-primary:active { background: #1a478f; }
+
+.qz-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+/* ---------- the clock ---------- */
+
+/* Tabular figures matter here: a clock that changes width every second pulls
+   the eye off the question. */
+.qz-clock {
+  padding: 6px 12px;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  color: var(--text);
+}
+
+.qz-clock-low {
+  background: rgba(210, 74, 74, 0.12);
+  color: var(--danger);
+}
+
+.qz-clock-paused { color: var(--muted-2); }
+
+.qz-progress-count {
+  margin-right: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.qz-note {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* ---------- the paper ---------- */
+
+/* `.markdown-body` is the whole-page column: an 880px measure, centred, with
+   88px of side padding and 160px of bottom padding. That is right for a page
+   and wrong for a paragraph under a question number — reusing it unmodified is
+   what put a canyon between a prompt and its answer box. Everything the renderer
+   styles is kept; the column is not. */
+.qz-md {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Diagrams and figures in a paper: fit the column, never overflow the card. */
+.qz-md svg {
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+}
+.qz-md img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* The numbered gap in a fill-in-the-blank sentence. The number is the only link
+   between the sentence and the boxes below it, so it carries the accent. */
+.qz-gap {
+  display: inline-grid;
+  place-items: center;
+  min-width: 2.1em;
+  height: 1.45em;
+  margin: 0 0.3em;
+  padding: 0 0.45em;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.74em;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 0.05em;
+}
+
+.qz-body,
+.qz-intro { padding-bottom: 40px; }
+
+.qz-intro { padding-top: 12px; }
+
+.qz-intro-inline {
+  margin: 0 0 28px;
+  padding: 18px 22px;
+  border-radius: var(--r-md);
+  background: var(--field-bg);
+  font-size: 14px;
+}
+
+.qz-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 20px;
+  margin: 20px 0 22px;
+  font-size: 13.5px;
+}
+
+.qz-facts dt { color: var(--muted); }
+.qz-facts dd { margin: 0; color: var(--text); font-weight: 550; }
+
+.qz-q { margin: 0 0 34px; }
+
+.qz-q-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.qz-q-num {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--field-bg);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-2);
+}
+
+.qz-q-marks {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.qz-q-score {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-2);
+}
+
+.qz-q-score.is-full { background: rgba(58, 167, 87, 0.14); color: var(--ok); }
+.qz-q-score.is-zero { background: rgba(210, 74, 74, 0.12); color: var(--danger); }
+
+/* Flag for review. Quiet until used, then unambiguous; the number badge is what
+   changes colour, so flagging a question never reflows the card. */
+.qz-flag {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-3);
+  cursor: pointer;
+}
+.qz-flag:hover { background: var(--hover-bg); color: var(--muted-2); }
+.qz-flag.is-flagged { background: var(--accent-soft); color: var(--accent); }
+.qz-flag .ic { display: block; }
+.qz-q.is-flagged .qz-q-num { background: var(--accent-soft); color: var(--accent); }
+
+.qz-q-prompt { font-size: 15px; }
+.qz-q-prompt > :first-child { margin-top: 0; }
+.qz-q-prompt > :last-child { margin-bottom: 0; }
+
+/* A passage reads as quoted material, not as another question: a fill and an
+   inset rule, no box. */
+.qz-passage {
+  margin: 0 0 14px;
+  padding: 14px 18px;
+  border-left: 2px solid var(--accent-soft-2);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--field-bg);
+  font-size: 14px;
+  color: var(--muted-2);
+}
+
+.qz-passage > :first-child { margin-top: 0; }
+.qz-passage > :last-child { margin-bottom: 0; }
+
+/* ---------- answer controls ---------- */
+
+.qz-input { margin-top: 14px; }
+
+.qz-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 13px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 14.5px;
+  transition: background 110ms ease;
+}
+
+.qz-opt:hover { background: var(--hover-bg); }
+
+.qz-opt input {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.qz-opt-text > :first-child { margin-top: 0; }
+.qz-opt-text > :last-child { margin-bottom: 0; }
+
+.qz-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.qz-blanks { display: grid; gap: 8px; }
+
+.qz-blank {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.qz-blank-num {
+  width: 18px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.qz-num { display: flex; align-items: center; gap: 10px; }
+
+.qz-unit { font-size: 14px; color: var(--muted-2); }
+
+.qz-input input[type='text'],
+.qz-textarea,
+.qz-match select {
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14.5px;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.qz-blank input[type='text'],
+.qz-num input[type='text'] { width: auto; flex: 1; max-width: 320px; }
+
+.qz-textarea {
+  display: block;
+  resize: vertical;
+  min-height: 76px;
+  line-height: 1.65;
+}
+
+.qz-input input[type='text']:focus,
+.qz-textarea:focus,
+.qz-match select:focus {
+  outline: none;
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-focus);
+}
+
+.qz-match { display: grid; gap: 8px; }
+
+.qz-match-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 14px;
+  font-size: 14.5px;
+}
+
+.qz-order {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 6px;
+  font-size: 14.5px;
+}
+
+.qz-order li { padding-left: 2px; }
+
+.qz-nudge {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-left: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--field-bg);
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.qz-nudge:hover:not(:disabled) { background: var(--hover-bg); }
+.qz-nudge:disabled { opacity: 0.35; cursor: default; }
+
+/* ---------- review ---------- */
+
+.qz-review { font-size: 14px; }
+
+.qz-review-line { margin: 0 0 4px; color: var(--text-2); }
+.qz-review-line strong { color: var(--muted); font-weight: 550; }
+
+.qz-review-blank { margin: 0; color: var(--muted); font-style: italic; }
+
+.qz-review-text {
+  margin: 0;
+  padding: 12px 15px;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+/* ---------- the key and the grader's notes ---------- */
+
+.qz-key { margin-top: 18px; display: grid; gap: 12px; }
+
+.qz-key-line { margin: 0; font-size: 13.5px; }
+.qz-key-line strong { color: var(--muted); font-weight: 550; }
+
+.qz-key-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  background: rgba(201, 138, 28, 0.10);
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.qz-feedback {
+  margin: 0;
+  padding: 12px 15px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.qz-criteria {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  font-size: 13.5px;
+}
+
+.qz-criteria li {
+  position: relative;
+  padding-left: 20px;
+  color: var(--text-2);
+}
+
+/* A tick drawn from the caret mask rather than a text glyph, so it matches the
+   rest of the chrome and never renders as an emoji. */
+.qz-criteria li::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0.55em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-3);
+}
+
+.qz-criteria li.met::before { background: var(--ok); }
+.qz-criteria li.met { color: var(--text); }
+.qz-criteria li.unmet { color: var(--muted); }
+
+.qz-model-answer {
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+}
+
+.qz-model-answer > summary {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.qz-model-answer > summary::-webkit-details-marker { display: none; }
+
+.qz-model-answer > summary::before {
+  content: '';
+  display: inline-block;
+  width: var(--caret-size);
+  height: var(--caret-size);
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: var(--caret-color);
+  -webkit-mask: var(--caret-mask) no-repeat center / contain;
+  mask: var(--caret-mask) no-repeat center / contain;
+  transition: transform 120ms ease;
+}
+
+.qz-model-answer[open] > summary::before { transform: rotate(90deg); }
+
+.qz-answer-body {
+  padding: 0 16px 14px;
+  font-size: 14px;
+}
+
+.qz-answer-body > :first-child { margin-top: 0; }
+.qz-answer-body > :last-child { margin-bottom: 0; }
+
+.qz-selfmark {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.qz-selfmark-btn {
+  appearance: none;
+  min-width: 28px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.qz-selfmark-btn:hover { background: var(--hover-bg); }
+
+.qz-selfmark-btn.is-picked {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ---------- the score ---------- */
+
+.qz-score {
+  padding: 26px 30px;
+  margin-bottom: 40px;
+  border-radius: var(--r-md);
+  background: var(--field-bg);
+}
+
+.qz-score-big {
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.qz-score-sub {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--muted-2);
+}
+
+/* ---------- grading ---------- */
+
+.qz-grading {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 120px 0;
+  text-align: center;
+}
+
+.qz-grading-head {
+  margin: 18px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.qz-grading-sub {
+  margin: 0;
+  max-width: 480px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.qz-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-soft-2);
+  border-top-color: var(--accent);
+  animation: qz-spin 720ms linear infinite;
+}
+
+@keyframes qz-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qz-spinner { animation-duration: 2.4s; }
+}
+
+/* Parse problems are a quiet banner, never a blank pane: a file with a typo in
+   it still has to open. */
+.qz-errors {
+  margin-bottom: 20px;
+  padding: 12px 15px;
+  border-radius: var(--r-sm, 8px);
+  background: var(--field-bg);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.qz-errors-head { margin-bottom: 6px; font-weight: 600; }
+.qz-errors-list { margin: 0; padding-left: 18px; color: var(--text-dim); }
+.qz-errors-list li + li { margin-top: 3px; }
+.qz-errors-line { font-family: var(--font-mono); font-size: 11.5px; opacity: 0.7; }
+
+@media (max-width: 1100px) {
+  .qz-scroll { padding: 0 40px 96px; }
+  .qz-bar { padding-top: 20px; }
 }

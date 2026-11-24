@@ -25,6 +25,7 @@ export type IconName =
   | 'unlock'
   | 'search'
   | 'doc'
+  | 'quiz'
   | 'image'
   | 'code'
   | 'table'
@@ -42,6 +43,7 @@ export type IconName =
   | 'book'
   | 'help'
   | 'panel'
+  | 'flag'
 
 /** Glyph interiors. Stroked unless the name appears in FILLED. */
 const GLYPHS: Record<IconName, string> = {
@@ -69,6 +71,12 @@ const GLYPHS: Record<IconName, string> = {
     '<rect x="3.4" y="5" width="17.2" height="14" rx="2.1"/>' +
     '<circle cx="9" cy="10" r="1.7"/>' +
     '<path d="M4.6 17.6l5.2-5a1.4 1.4 0 0 1 1.9 0l7.7 7.3"/>',
+  // The doc sheet with its rules replaced by a tick — a paper you answer rather
+  // than read. Deliberately the same silhouette as `doc` so the two read as
+  // siblings at 13px, where a wholly different shape would look like a mistake.
+  quiz:
+    '<path d="M14.3 3.2H7.4a1.9 1.9 0 0 0-1.9 1.9v13.8a1.9 1.9 0 0 0 1.9 1.9h9.2a1.9 1.9 0 0 0 1.9-1.9V7.5z"/>' +
+    '<path d="M14.3 3.2v4.3h4.2"/><path d="M8.9 14.2l2.2 2.2 4.1-4.3"/>',
   code: '<path d="M9.1 7 4.3 12l4.8 5"/><path d="M14.9 7 19.7 12l-4.8 5"/>',
   table:
     '<rect x="3.4" y="4.9" width="17.2" height="14.2" rx="2.1"/>' +
@@ -104,7 +112,11 @@ const GLYPHS: Record<IconName, string> = {
     '<path d="M12 17h.01"/>',
   // The empty-split placeholder: a second pane beside the first.
   panel:
-    '<rect x="3.4" y="4.9" width="17.2" height="14.2" rx="2.1"/><path d="M13.6 4.9v14.2"/>'
+    '<rect x="3.4" y="4.9" width="17.2" height="14.2" rx="2.1"/><path d="M13.6 4.9v14.2"/>',
+  // A pennant on a mast: the one mark a candidate already knows means "come
+  // back to this one".
+  flag:
+    '<path d="M6.2 21V3.6"/><path d="M6.2 4.4c3.5-1.9 6.4-1.9 9.9 0 1 .5 2.1.5 3.1-.1v9c-1 .6-2.1.6-3.1.1-3.5-1.9-6.4-1.9-9.9 0z"/>'
 }
 
 /** Drawn solid instead of stroked. */
