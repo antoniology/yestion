@@ -1,134 +1,114 @@
 # Yestion
 
-**A free, local-first notes app built around a student's school year.**
-Your notes are plain markdown files in a folder you choose — with a built-in AI
-agent, a real exam runner, and LaTeX-quality typesetting.
+**A local-first Markdown notebook, LaTeX typesetter, and exam runner I built to make school easier.**
 
-[![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-black?logo=apple)](https://github.com/antoniology/yestion)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Made for students](https://img.shields.io/badge/made%20for-students-6f42c1)](#why-not-notion)
-
-Yestion is not a workspace platform. It is a folder of markdown files, a good
-editor, and an agent that can work on them — offline, without an account, and
-without a subscription.
+![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-black?logo=apple)![License](https://img.shields.io/badge/license-MIT-blue.svg)![Made for students](https://img.shields.io/badge/made%20for-students-6f42c1)Yestion is a folder of plain `.md` files, a fast distraction-free editor, and an in-process AI agent—offline, account-free, and subscription-free.
 
 ---
 
-## Why not Notion?
+## Why Yestion?
 
-Both can hold your notes. They disagree about who owns them.
+### Plain files, real folders
 
-| | **Yestion** | **Notion** |
+- **One folder per school year** — every subject is a directory, every note is a `.md` file. The sidebar reflects your folder tree with no import step.
+- **Live sync with external editors** — Yestion watches your folder, so edits made by another editor or the built-in agent appear immediately.
+- **Fast navigation** — `[[Page Title]]` wiki-links, full-workspace search, and a collapsible page outline.
+- **Private by design** — no accounts, no telemetry, no cloud sync. Workspaces can optionally be encrypted at rest.
+
+### Built for math, physics & worksheets
+
+- **LaTeX typesetting** — `$inline$` and `$$display$$` equations render with KaTeX, paired with bundled with a variety of sans, serif and monospace fonts for a diverse reading view.
+- **Flexible tables & diagrams** — supports Markdown, borderless, and LaTeX (`booktabs`) table styles, inline SVG diagrams, `<h>highlights</h>`, and preserved blank lines for printable worksheets.
+- **PDF export** — export notes or papers to PDF with your chosen font embedded.
+- **8 themes** — light and dark themes.
+
+### Interactive `.qz` exam & flashcard runner
+
+Any quiz, past paper, or flashcard deck lives in a single plain-text `.qz` file. Open it in Yestion to launch a full exam environment:
+
+- **Question types** — multiple choice, true/false, fill-in-the-blank, numeric, matching, ordering, and short/long prose answers.
+- **Flexible layouts & timing** — `page = sep` for one question per screen or `cont` for a scrolling paper, with a persistent timer that survives tab switches.
+- **Autosave & resume** — answers, flags, marks, and remaining time are saved continuously so you can close the app mid-paper and pick back up later.
+- **Marking & contest scoring** — automatic grading for objective questions, model-based grading for prose, and custom scoring rules for contests (e.g. AMC: `+6` correct, `0` wrong, `+1.5` blank).
+
+### In-process AI agent (BYOK)
+
+The side-panel agent runs [pi](https://github.com/badlogic/pi-mono) directly inside the app with read, write, and search access to your workspace.
+
+- **Built for study workflows** — summarize a chapter, turn a past paper into revision notes, or generate a `.qz` practice quiz from your notes.
+- **Bring your own key** — works with Anthropic, OpenAI-compatible endpoints, Google, or local Ollama models.
+- **Safe & resilient** — API keys are stored in the **macOS Keychain** (never in your notes or repo), conversations are resumable, and failed streams retry automatically.
+
+---
+
+## Yestion vs. Notion
+
+If you want a team wiki with databases and permissions, use Notion. If you want school notes you can still open in any text editor ten years from now, use Yestion.
+
+|  | **Yestion** | **Notion** |
 | --- | --- | --- |
-| **Where notes live** | Plain `.md` files in a folder you pick | Notion's cloud workspace |
-| **Account required** | No | Yes |
-| **Works offline** | Yes — it is a local app | Limited / needs sync |
-| **Cost** | Free, MIT | Free tier; paid plans and AI add-ons |
-| **AI** | A real agent with file access, using **your own** API key | Notion AI subscription, cloud-only |
-| **Leaving** | Copy the folder | Export, then convert |
-| **Exams & revision** | Built-in `.qz` exam, quiz and flashcard runner with marking | Not a native feature |
-| **Maths & physics** | KaTeX everywhere, Computer Modern bundled, PDF export | Basic equations |
-| **Tables** | Markdown, borderless, or LaTeX (booktabs) styles | Block-based tables |
-
-If you want a team wiki with databases and permissions, use Notion. If you want
-your school notes to be files you can read in ten years with any text editor,
-Yestion is built for that.
+| **Storage** | Plain `.md` files in a folder you choose | Notion's cloud workspace |
+| **Account** | None | Required |
+| **Offline** | Full local-first support | Limited / sync-dependent |
+| **Pricing** | Free, MIT | Free tier; paid plans & AI add-ons |
+| **AI** | Workspace agent using your own API key. You can also let your coding agent read all your notes: it's just markdown. | Cloud-only Notion AI subscription |
+| **Portability** | Copy the folder | Export and convert |
+| **Exams & revision** | Native `.qz` exam, quiz & flashcard runner | Not built in |
+| **Math & tables** | KaTeX, Computer Modern, `booktabs` tables, PDF export | Basic equations & block tables |
 
 ---
 
-## Made for students
+## Getting started
 
-The app assumes the things a school year actually involves:
+### Requirements
 
-- **One workspace per school year** — every subject is a folder, every page a
-  markdown file. The sidebar is the folder tree; there is no separate "import".
-- **Physics and maths** — `$inline$` and `$$display$$` equations render with
-  KaTeX, and **Computer Modern** is bundled as a reading font for a paper-like
-  page.
-- **Revision, not just reading** — turn a topic into a quiz, take it under a
-  timer, get it marked, and keep the attempt if you close the app.
-- **Worksheets** — preserved blank lines, highlights (`<h>…</h>`), tables and
-  inline SVG diagrams all survive a save/reload round trip.
-- **Search and links** — `[[Page Title]]` links, full-workspace search, an
-  outline of the page you are reading.
-- **PDF** — export a page or a paper with the chosen font embedded.
+- **macOS 12+** (Apple Silicon for packaged builds)
+- **Node.js 20+**
 
-### The exam runner
-
-A quiz, exam or flashcard deck is a single `.qz` file. Open it and it runs:
-
-- timed papers with a start screen and a clock that survives tab switches;
-- multiple choice, true/false, fill-in-the-blanks, short and long answers,
-  numeric, matching and ordering questions;
-- automatic marking for objective questions, model-based marking for prose;
-- rule-based scoring for contest papers (e.g. AMC: correct 6, wrong 0,
-  blank 1.5);
-- answers, flags, marks and the clock autosaved and restored;
-- `page = sep` for one question per screen, or `cont` for a scrolling sheet.
-
-The file is plain text with the answers inside it — your paper, your key.
-
-## The agent
-
-The agent panel runs [pi](https://github.com/badlogic/pi-mono) in-process. It can
-read, write and search the workspace, so you can ask it to summarise a page,
-draft revision notes from a past paper, or author a `.qz` file.
-
-- Bring your own provider and API key (OpenAI-compatible, Anthropic, Google, or
-  a local Ollama model).
-- Keys are stored in the **macOS Keychain**.
-- Conversations are resumable, and failed streams are retried instead of
-  dropping the task.
-
-## Privacy
-
-- Notes never leave the folder you choose. There is no Yestion account and no
-  Yestion server.
-- The app watches the folder; edits made by the agent or another editor appear
-  live.
-- API keys are kept in the Keychain, not in your notes or in this repository.
-- Workspaces can optionally be encrypted at rest.
-
-## Requirements
-
-- macOS 12 or later (Apple Silicon for the packaged build).
-- Node.js 20+ to build from source.
-
-## Build from source
+### Run or build from source
 
 ```sh
 git clone https://github.com/antoniology/yestion.git
 cd yestion
 npm install
-npm run dev          # run the app in development
-npm run typecheck    # both TypeScript projects
-npm run build        # renderer + main bundles in out/
-npm run package      # dist/mac-arm64/Yestion.app
-npm run dmg          # wrap the packaged app in a DMG
+
+# Run in development
+npm run dev
+
+# Or package a local macOS app / DMG
+npm run package      # outputs dist/mac-arm64/Yestion.app
+npm run dmg          # wraps the app in a DMG
 ```
 
-There is no notarized download yet; a locally built app needs the usual macOS
-"Open Anyway" approval on first launch.
+> **Note:** Packaged builds are not notarized yet, so macOS will require a one-time **Open Anyway** approval in System Settings on first launch.
 
-## Project layout
+---
 
-```
-src/main        Electron main process: workspace, watcher, agent, printing
-src/preload     contextBridge API (the renderer compiles against index.d.ts)
-src/renderer    UI, TipTap editor, quiz runner, agent panel
-resources       icons and entitlements
-scripts         packaging helpers
+## Development
+
+```sh
+npm run typecheck    # typecheck both main and renderer TypeScript projects
+npm run build        # build main and renderer bundles into out/
 ```
 
-## Status
+### Project layout
 
-Yestion is an early, personal project. It is a working daily driver for one
-student, not a polished commercial product. Issues and pull requests are
-welcome; expect the shape of the app to keep moving.
+```text
+src/main        Electron main process (workspace, file watcher, agent, PDF printing)
+src/preload     contextBridge API (renderer compiles against index.d.ts)
+src/renderer    UI, TipTap editor, .qz quiz runner, agent panel
+resources       App icons and macOS entitlements
+scripts         Packaging and DMG helpers
+```
+
+---
+
+## Status & contributing
+
+Yestion is an active, student-built daily driver. Expect the UI and `.qz` format to keep evolving; issues and pull requests are welcome.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-Bundled fonts: CMU Serif is distributed under the SIL Open Font License; KaTeX
-ships its own fonts under their respective licenses.
+Bundled fonts: **CMU Serif** is distributed under the SIL Open Font License; **KaTeX** ships its own fonts under their respective licenses.
