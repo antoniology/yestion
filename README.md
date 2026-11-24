@@ -6,6 +6,19 @@
 
 ---
 
+## Download
+
+A prebuilt macOS build (Apple Silicon) is committed at
+**[`release/Yestion-1.0.0-arm64.zip`](release/Yestion-1.0.0-arm64.zip)** and
+tracked with **Git LFS** — run `git lfs pull` after cloning to fetch it.
+
+The app is **ad-hoc signed**, not notarized (this project has no Apple Developer
+ID). macOS blocks the first launch; allow it once in **System Settings →
+Privacy & Security → Open Anyway**, then open the app.
+
+---
+
+
 ## Why Yestion?
 
 ### Plain files, real folders
@@ -17,7 +30,7 @@
 
 ### Built for math, physics & worksheets
 
-- **LaTeX typesetting** — `$inline$` and `$$display$$` equations render with KaTeX, paired with bundled with a variety of sans, serif and monospace fonts for a diverse reading view.
+- **LaTeX typesetting** — `$inline$` and `$$display$$` equations render with KaTeX, paired with a variety of sans, serif and monospace fonts for a diverse reading view.
 - **Flexible tables & diagrams** — supports Markdown, borderless, and LaTeX (`booktabs`) table styles, inline SVG diagrams, `<h>highlights</h>`, and preserved blank lines for printable worksheets.
 - **PDF export** — export notes or papers to PDF with your chosen font embedded.
 - **8 themes** — light and dark themes.
