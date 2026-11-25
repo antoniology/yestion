@@ -775,9 +775,15 @@ function makeTabEl(): HTMLElement {
     const from = Number(e.dataTransfer?.getData('text/yestion-tab') ?? '-1')
     const i = tabIndexForEl(el)
     if (from < 0 || i < 0 || from === i) return
+    // Reordering changes slots, not the page on screen. Keep `activeTab`
+    // pointing at the shown page; retargeting it to the moved tab made the
+    // highlighted tab, the sidebar and the editor disagree — and an undo or a
+    // save straight after a drag then landed on the wrong page.
+    const shown = tabs[activeTab]?.relPath ?? null
     const [moved] = tabs.splice(from, 1)
     tabs.splice(i, 0, moved)
-    activeTab = tabs.indexOf(moved)
+    const kept = shown ? tabs.findIndex((t) => t.relPath === shown) : -1
+    activeTab = kept >= 0 ? kept : tabs.indexOf(moved)
     renderTabs()
     persistTabs()
   })
