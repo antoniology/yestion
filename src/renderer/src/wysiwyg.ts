@@ -12,7 +12,7 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import MarkdownIt from 'markdown-it'
 import { DOMParser as PMDOMParser } from '@tiptap/pm/model'
-import { NodeSelection, Plugin, TextSelection } from '@tiptap/pm/state'
+import { NodeSelection, Plugin, TextSelection, type Transaction } from '@tiptap/pm/state'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PMNode } from 'prosemirror-model'
 import { Fragment as PMFragment } from 'prosemirror-model'
@@ -1208,6 +1208,74 @@ const TableStyleDecoration = Extension.create({
         view: (view) => {
           sync(view)
           return { update: (updated) => sync(updated) }
+        }
+      })
+    ]
+  }
+})
+
+/**
+ * Two ordered lists sitting directly beside each other are an editing accident,
+ * not an intention: pressing Enter inside a multi-block item and then Backspace
+ * on the empty one can leave the tail of a list as a sibling <ol>, which
+ * restarts numbering at 1 (1 2 3 4 5 becomes 1 … 1 2 3 4). Join them back so a
+ * sequence keeps one continuous count.
+ */
+const AdjacentListJoin = Extension.create({
+  name: 'yestionAdjacentListJoin',
+  addProseMirrorPlugins() {
+    /** The next pair of ordered lists with only empty paragraphs between them. */
+    const findJoin = (
+      doc: PMNode
+    ): { from: number; to: number; joinAt: number } | null => {
+      let found: { from: number; to: number; joinAt: number } | null = null
+      const walk = (parent: PMNode, parentPos: number): void => {
+        if (found) return
+        let offset = 0
+        for (let i = 0; i < parent.childCount && !found; i++) {
+          const child = parent.child(i)
+          if (child.type.name === 'orderedList') {
+            const from = parentPos + offset + child.nodeSize
+            let to = from
+            let j = i + 1
+            while (j < parent.childCount) {
+              const between = parent.child(j)
+              if (between.type.name !== 'paragraph' || between.content.size !== 0) break
+              to += between.nodeSize
+              j++
+            }
+            if (j < parent.childCount && j > i + 1 && parent.child(j).type.name === 'orderedList') {
+              found = { from, to, joinAt: from }
+              return
+            }
+            if (j === i + 1 && j < parent.childCount && parent.child(j).type.name === 'orderedList') {
+              found = { from, to, joinAt: from }
+              return
+            }
+          }
+          walk(child, parentPos + offset)
+          offset += child.nodeSize
+        }
+      }
+      walk(doc, 0)
+      return found
+    }
+
+    return [
+      new Plugin({
+        appendTransaction: (transactions, _oldState, newState) => {
+          if (!transactions.some((tr) => tr.docChanged)) return null
+          let tr: Transaction | null = null
+          let doc = newState.doc
+          for (;;) {
+            const found = findJoin(doc)
+            if (!found) break
+            if (!tr) tr = newState.tr
+            if (found.to > found.from) tr.delete(found.from, found.to)
+            tr.join(found.joinAt)
+            doc = tr.doc
+          }
+          return tr
         }
       })
     ]
@@ -3156,6 +3224,7 @@ export function createRichEditor(
       TableKit.configure({ table: false }),
       RichTable.configure({ resizable: true }),
       TableStyleDecoration,
+      AdjacentListJoin,
       Column,
       ColumnList,
       HeadingBehaviour,
