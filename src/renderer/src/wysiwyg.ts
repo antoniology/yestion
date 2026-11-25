@@ -137,6 +137,61 @@ function looksLikeMarkdown(text: string): boolean {
   )
 }
 
+/**
+ * Repair LaTeX whose backslashes were double-escaped on the way in.
+ *
+ * Copying an equation out of a JSON string, a JavaScript source file or a wiki
+ * that stores TeX in JSON gives `\\text{K}` instead of `\text{K}`. KaTeX reads
+ * `\\` as a line break and then "text" as five italic variables — in most
+ * positions it throws, and `throwOnError: false` dumps the whole source into an
+ * error span, which is the "pasted LaTeX shows up as literal \text" bug.
+ *
+ * `\\` followed by a *letter* is never meaningful LaTeX (real line breaks are
+ * followed by a newline, `[`, `*` or another command), so halving that run is
+ * safe. Repeated so quadruple-escaped input (`\\\\frac`) converges too.
+ */
+function normalizeTexEscapes(tex: string): string {
+  let out = tex
+  for (let i = 0; i < 4 && out.includes('\\\\'); i++) {
+    const next = out.replace(/\\\\(?=[A-Za-z])/g, '\\')
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
+/** `\text{...}`, `\mathrm{...}`, … — labels, not prose, when judging a paste. */
+const TEX_LABEL_CMD = /\\(?:text|textrm|textnormal|textbf|textit|mathrm|mathbf|mathit|operatorname|mbox|ce)\s*\{[^{}]*\}/g
+
+/**
+ * Is this clipboard *only* a LaTeX expression, with no `$` fences around it?
+ *
+ * Papers, PDFs and LaTeX editors put bare `\frac…`, `2\text{K}_…` on the
+ * clipboard; pasting it used to insert the source as a paragraph of literal
+ * text. Returns the expression when the whole paste clearly is one equation,
+ * and null when it is prose that merely mentions maths (`the \frac{a}{b} term
+ * …`), a markdown document, or multiple paragraphs.
+ */
+function bareLatexExpression(text: string): string | null {
+  const t = text.trim()
+  if (!t || t.length > 4000) return null
+  if (t.includes('$')) return null
+  if (!/\\[A-Za-z]+/.test(t)) return null
+  // Real maths, not just a stray command.
+  if (!/[_^=<>]|\\to\b|\\rightarrow|\\Rightarrow|\\frac|\\dfrac|\\sqrt|\\begin\{/.test(t)) return null
+  // Markdown structure means the user pasted a document, not an equation.
+  if (/(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|```|~~~|\|)/.test(t)) return null
+  if (/\n\s*\n/.test(t)) return null
+  // Drop the commands and their text labels; anything word-like that survives
+  // is prose ("Solve for x"), so leave it to the normal paste path.
+  const stripped = t
+    .replace(TEX_LABEL_CMD, ' ')
+    .replace(/\\[A-Za-z]+/g, ' ')
+    .replace(/[{}\\]/g, ' ')
+  if (/[A-Za-z]{3,}/.test(stripped)) return null
+  return t
+}
+
 // Genuinely formatted HTML (the paste already made bold/headings/lists for us).
 function hasRichFormatting(html: string): boolean {
   return /<(strong|b|em|i|h[1-6]|ul|ol|li|table|thead|tbody|tr|td|th|blockquote|img|a|figure|details)\b/i.test(
@@ -293,7 +348,7 @@ function installMathMarkdownRules(md: MarkdownItLike): void {
       i++
     }
     if (end < 0) return false
-    const content = src.slice(start + close.length, end)
+    const content = normalizeTexEscapes(src.slice(start + close.length, end))
     if (!content.trim()) return false
     if (close === '\\]' && !looksLikeMathSource(content)) return false
     if (!silent) {
@@ -321,12 +376,13 @@ function installMathMarkdownRules(md: MarkdownItLike): void {
       if (silent) return /^\$\$/.test(line)
       const single = /^\$\$([\s\S]+?)\$\$\s*$/.exec(line)
       if (single) {
+        const tex = normalizeTexEscapes(single[1])
         const token = state.push('math_block', 'div', 0)
-        token.content = single[1]
+        token.content = tex
         token.block = true
         token.map = [startLine, startLine + 1]
         token.attrSet('data-type', 'math-block')
-        token.attrSet('data-tex', single[1])
+        token.attrSet('data-tex', tex)
         state.line = startLine + 1
         return true
       }
@@ -337,12 +393,13 @@ function installMathMarkdownRules(md: MarkdownItLike): void {
       if (single) {
         // Same guard as inline: `\[1\]` alone on a line is a label.
         if (!looksLikeMathSource(single[1])) return false
+        const tex = normalizeTexEscapes(single[1])
         const token = state.push('math_block', 'div', 0)
-        token.content = single[1]
+        token.content = tex
         token.block = true
         token.map = [startLine, startLine + 1]
         token.attrSet('data-type', 'math-block')
-        token.attrSet('data-tex', single[1])
+        token.attrSet('data-tex', tex)
         state.line = startLine + 1
         return true
       }
@@ -360,7 +417,7 @@ function installMathMarkdownRules(md: MarkdownItLike): void {
       next++
     }
 
-    const content = state.getLines(startLine + 1, next, state.sCount[startLine], false)
+    const content = normalizeTexEscapes(state.getLines(startLine + 1, next, state.sCount[startLine], false))
     if (line.startsWith('\\[') && !looksLikeMathSource(content)) return false
     const token = state.push('math_block', 'div', 0)
     token.content = content
@@ -398,7 +455,9 @@ function installMathMarkdownRules(md: MarkdownItLike): void {
       }
       // Unterminated environment: leave it alone rather than eating the file.
       if (next >= endLine) return false
-      const content = state.getLines(startLine, next + 1, state.sCount[startLine], false).trim()
+      const content = normalizeTexEscapes(
+        state.getLines(startLine, next + 1, state.sCount[startLine], false).trim()
+      )
       const token = state.push('math_block', 'div', 0)
       token.content = content
       token.block = true
@@ -514,6 +573,23 @@ function openMathEditor(editor: Editor, pos: number, onClose?: () => void): void
   }
 
   input.addEventListener('input', () => apply(input.value))
+  // Pasting TeX into the popup: drop $ fences (the popup takes raw TeX) and
+  // repair double-escaped backslashes before KaTeX sees them.
+  input.addEventListener('paste', (e) => {
+    const raw = e.clipboardData?.getData('text/plain')
+    if (!raw) return
+    let tex = normalizeTexEscapes(raw.trim())
+    const fenced = /^\$\$?([\s\S]*?)\$\$?$/.exec(tex)
+    if (fenced) tex = fenced[1]
+    if (tex === raw) return
+    e.preventDefault()
+    const start = input.selectionStart ?? input.value.length
+    const end = input.selectionEnd ?? input.value.length
+    input.value = input.value.slice(0, start) + tex + input.value.slice(end)
+    const caret = start + tex.length
+    input.setSelectionRange(caret, caret)
+    apply(input.value)
+  })
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault()
@@ -1364,7 +1440,7 @@ const MathInline = TipTapNode.create({
     return [
       {
         tag: 'span[data-type="math-inline"]',
-        getAttrs: (el) => ({ tex: (el as HTMLElement).getAttribute('data-tex') ?? '' })
+        getAttrs: (el) => ({ tex: normalizeTexEscapes((el as HTMLElement).getAttribute('data-tex') ?? '') })
       }
     ]
   },
@@ -1421,7 +1497,7 @@ const MathBlock = TipTapNode.create({
     return [
       {
         tag: 'div[data-type="math-block"]',
-        getAttrs: (el) => ({ tex: (el as HTMLElement).getAttribute('data-tex') ?? '' })
+        getAttrs: (el) => ({ tex: normalizeTexEscapes((el as HTMLElement).getAttribute('data-tex') ?? '') })
       }
     ]
   },
@@ -3284,6 +3360,43 @@ export function createRichEditor(
         if (view.state.selection.$from.parent.type.name === 'codeBlock') return false
         const text = dt.getData('text/plain')
         if (!text) return false
+        // A clipboard that is nothing but LaTeX (copied from a paper, a PDF or
+        // a .tex file) becomes an equation node. Without this the source was
+        // inserted literally — `2\text{K}_…` showed up as a paragraph of raw
+        // TeX instead of a rendered formula.
+        const bareTex = bareLatexExpression(text)
+        if (bareTex) {
+          event.preventDefault()
+          const tex = normalizeTexEscapes(bareTex)
+          // Equations are display maths; a short snippet pasted into a
+          // sentence reads better inline.
+          const display =
+            tex.includes('\n') ||
+            tex.length > 32 ||
+            /\\to\b|\\rightarrow|\\Rightarrow|\\begin\{/.test(tex)
+          const type = display ? 'mathBlock' : 'mathInline'
+          if (!view.state.schema.nodes[type]) return false
+          editor.chain().focus().insertContent({ type, attrs: { tex } }).run()
+          // A display equation at the very end of the page would leave nowhere
+          // to type; give it a paragraph to live above.
+          const doc = editor.state.doc
+          if (display && doc.lastChild?.type.name === 'mathBlock') {
+            editor.view.dispatch(
+              editor.state.tr.insert(doc.content.size, editor.state.schema.nodes.paragraph.create())
+            )
+          }
+          // insertContent leaves an atom selected; a following keystroke would
+          // replace the formula. Put the caret after it instead.
+          const sel = editor.state.selection
+          if (sel instanceof NodeSelection) {
+            editor.view.dispatch(
+              editor.state.tr.setSelection(
+                TextSelection.near(editor.state.doc.resolve(sel.to), 1)
+              )
+            )
+          }
+          return true
+        }
         if (dt.types.includes('text/html')) {
           // Copying a markdown CODEBLOCK out of an AI chat (or an editor with
           // syntax-highlight copy) carries the raw source as text/plain AND a
