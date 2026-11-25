@@ -8,9 +8,13 @@
 
 ## Download
 
-A prebuilt macOS build (Apple Silicon) is committed at
-**[`release/Yestion-1.0.0-arm64.zip`](release/Yestion-1.0.0-arm64.zip)** and
-tracked with **Git LFS** — run `git lfs pull` after cloning to fetch it.
+**[Download Yestion 1.0.0 for macOS →](https://github.com/antoniology/yestion/releases/latest)**
+(Apple Silicon, macOS 12 or later). The release carries
+`Yestion-1.0.0-arm64.zip` and its SHA-256 checksum.
+
+The same zip is also committed at
+[`release/Yestion-1.0.0-arm64.zip`](release/Yestion-1.0.0-arm64.zip) via **Git
+LFS** (`git lfs pull` after cloning).
 
 The app is **ad-hoc signed**, not notarized (this project has no Apple Developer
 ID). macOS blocks the first launch; allow it once in **System Settings →
