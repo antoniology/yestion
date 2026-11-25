@@ -1788,7 +1788,11 @@ body.resizing-h {
 .markdown-body table[data-table-style='latex'] td {
   border: none;
 }
-.markdown-body table[data-table-style='latex'] th {
+/* The rule sits under the *first row*, not under `th`: a table pasted from
+   elsewhere often has a bold first row made of plain `td` cells, and keying the
+   line to `th` left those tables with no rules at all — they looked borderless. */
+.markdown-body table[data-table-style='latex'] tr:first-child > th,
+.markdown-body table[data-table-style='latex'] tr:first-child > td {
   border-bottom: 1px solid var(--text);
 }
 
