@@ -1831,6 +1831,14 @@ body.resizing-h {
   margin: 0.15em 0;
 }
 
+/* A bold mark lives on the text inside the item's paragraph; the list marker
+   ("1.", "2.") belongs to the <li> and never receives an inline mark, so
+   bolding a whole item left its number in normal weight. When the item's
+   paragraph is entirely bold, bold the item — and therefore its marker. */
+.markdown-body li:has(> p > strong:only-child) {
+  font-weight: 600;
+}
+
 .markdown-body img {
   max-width: 100%;
   border-radius: var(--r-sm);
