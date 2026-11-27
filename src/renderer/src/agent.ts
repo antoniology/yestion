@@ -106,6 +106,7 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
   openRecent: (anchor: HTMLElement) => Promise<void>
   setWorkspace: (path: string | null) => Promise<void>
   dismissFloats: () => HTMLElement[]
+  focusInput: () => void
 } {
   const messagesEl = document.getElementById('agent-messages') as HTMLElement
   const form = document.getElementById('agent-form') as HTMLFormElement
@@ -1826,6 +1827,10 @@ export function setupAgentPanel(opts: AgentPanelOpts): {
      * and the slash list. Without this they stayed on screen after the panel
      * was hidden, and Escape reached neither.
      */
+    /** Put the caret in the prompt field (⌘⇧A when the panel is already open). */
+    focusInput: (): void => {
+      input.focus()
+    },
     dismissFloats: (): HTMLElement[] => {
       const closed: HTMLElement[] = []
       const pop = document.getElementById('agent-recent-pop')

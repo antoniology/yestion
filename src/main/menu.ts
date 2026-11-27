@@ -85,6 +85,8 @@ export function buildAppMenu(_onNewWindow: () => void, onCommand: (cmd: string) 
         { type: 'separator' as const },
         { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: () => onCommand('new-tab') },
         { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => onCommand('close-tab') },
+        { label: 'Next Tab', accelerator: 'Ctrl+Tab', click: () => onCommand('next-tab') },
+        { label: 'Previous Tab', accelerator: 'Ctrl+Shift+Tab', click: () => onCommand('prev-tab') },
         { type: 'separator' },
         { label: 'Cycle Theme', accelerator: 'CmdOrCtrl+Shift+T', click: () => onCommand('cycle-theme') },
         { type: 'separator' },
@@ -132,6 +134,8 @@ export function buildAppMenu(_onNewWindow: () => void, onCommand: (cmd: string) 
       role: 'help',
       submenu: [
         { label: `Yestion ${app.getVersion()}`, enabled: false },
+        { type: 'separator' },
+        { label: 'Keyboard Shortcuts…', accelerator: 'CmdOrCtrl+/', click: () => onCommand('shortcuts') },
         { type: 'separator' },
         // Was a dead "Yestion on GitHub" item pointing at https://github.com/.
         // Nobody has a repo URL for this build, so the Help menu does something

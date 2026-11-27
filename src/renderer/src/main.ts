@@ -887,6 +887,22 @@ function restoreActiveScroll(top: number | undefined): void {
   }
 }
 
+/** Ctrl+Tab / Ctrl+Shift+Tab (and ⌘⇧] / ⌘⇧[): move through the open tabs,
+ *  wrapping at the ends. In split view, cycling acts on the pane being used. */
+function cycleTabs(dir: 1 | -1): void {
+  if (tabs.length < 2) return
+  if (splitOpen && activePane === 'right' && splitRel) {
+    const cur = tabs.findIndex((t) => t.relPath === splitRel)
+    if (cur < 0) return
+    const next = tabs[(cur + dir + tabs.length) % tabs.length]
+    if (next && next.relPath !== tabs[activeTab]?.relPath) {
+      void setSplitTarget(next.relPath, next.kind, next.title)
+    }
+    return
+  }
+  void activateTab((activeTab + dir + tabs.length) % tabs.length)
+}
+
 async function activateTab(i: number): Promise<void> {
   const tab = tabs[i]
   if (!tab) return
@@ -2142,6 +2158,15 @@ window.api.onMenuAction((action) => {
     case 'close-tab':
       closeTab(activeTab)
       break
+    case 'next-tab':
+      cycleTabs(1)
+      break
+    case 'prev-tab':
+      cycleTabs(-1)
+      break
+    case 'shortcuts':
+      openShortcuts()
+      break
     case 'save':
       void persistNow()
       void flushTextFile()
@@ -2159,9 +2184,22 @@ window.api.onMenuAction((action) => {
       setSidebarOpen(sb.hidden as boolean, true)
       break
     }
-    case 'toggle-agent':
-      toggleAgentPanel()
+    case 'toggle-agent': {
+      // ⌘⇧A is "bring me the assistant": open it and put the caret in the
+      // prompt. A second press while already in the prompt closes it, so the
+      // key stays a toggle without stealing focus from the page when the
+      // panel is merely open in the background.
+      const panel = document.getElementById('agent-panel') as HTMLElement
+      if (panel.hidden) {
+        toggleAgentPanel()
+        agentPanel?.focusInput()
+      } else if (!panel.contains(document.activeElement)) {
+        agentPanel?.focusInput()
+      } else {
+        toggleAgentPanel()
+      }
       break
+    }
     case 'toggle-source':
       toggleSource()
       break
@@ -3706,6 +3744,128 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === ']') {
     e.preventDefault()
     goForward()
+  }
+})
+
+// ---- Keyboard shortcuts cheatsheet (⌘/) ----
+const shortcutsModalEl = document.getElementById('shortcuts-modal') as HTMLElement
+const shortcutsListEl = document.getElementById('shortcuts-list') as HTMLElement
+
+const SHORTCUT_GROUPS: { title: string; rows: { label: string; keys: string[] }[] }[] = [
+  {
+    title: 'Pages & tabs',
+    rows: [
+      { label: 'New page', keys: ['⌘N'] },
+      { label: 'New tab', keys: ['⌘T'] },
+      { label: 'Close tab', keys: ['⌘W'] },
+      { label: 'Next tab', keys: ['⌃Tab', '⌘⇧]'] },
+      { label: 'Previous tab', keys: ['⌃⇧Tab', '⌘⇧['] },
+      { label: 'Jump to tab 1–9', keys: ['⌘1…⌘9'] }
+    ]
+  },
+  {
+    title: 'Navigation',
+    rows: [
+      { label: 'Back', keys: ['⌘['] },
+      { label: 'Forward', keys: ['⌘]'] },
+      { label: 'Find in page', keys: ['⌘F'] },
+      { label: 'Search workspace', keys: ['⌘⇧F'] },
+      { label: 'Open workspace', keys: ['⌘O'] }
+    ]
+  },
+  {
+    title: 'Panes & view',
+    rows: [
+      { label: 'Toggle left menu', keys: ['⌘\\'] },
+      { label: 'AI assistant (open & focus)', keys: ['⌘⇧A'] },
+      { label: 'Source view', keys: ['⌘⇧E'] },
+      { label: 'PDF preview', keys: ['⌘⇧P'] },
+      { label: 'Cycle theme', keys: ['⌘⇧T'] },
+      { label: 'Zoom in / out / reset', keys: ['⌘+', '⌘−', '⌘0'] }
+    ]
+  },
+  {
+    title: 'Writing & files',
+    rows: [
+      { label: 'Indent / outdent a line', keys: ['Tab', '⇧Tab'] },
+      { label: 'Save now', keys: ['⌘S'] },
+      { label: 'Reveal page in Finder', keys: ['⌘⇧R'] },
+      { label: 'Keyboard shortcuts', keys: ['⌘/'] }
+    ]
+  }
+]
+
+function buildShortcutsList(): void {
+  if (shortcutsListEl.childElementCount > 0) return
+  for (const group of SHORTCUT_GROUPS) {
+    const title = document.createElement('div')
+    title.className = 'shortcuts-group-title'
+    title.textContent = group.title
+    shortcutsListEl.appendChild(title)
+    for (const row of group.rows) {
+      const el = document.createElement('div')
+      el.className = 'shortcut-row'
+      const label = document.createElement('span')
+      label.textContent = row.label
+      const keys = document.createElement('span')
+      keys.className = 'shortcut-keys'
+      for (const combo of row.keys) {
+        const kbd = document.createElement('kbd')
+        kbd.textContent = combo
+        keys.appendChild(kbd)
+      }
+      el.append(label, keys)
+      shortcutsListEl.appendChild(el)
+    }
+  }
+}
+
+function openShortcuts(): void {
+  buildShortcutsList()
+  shortcutsModalEl.hidden = false
+  ;(document.getElementById('shortcuts-close') as HTMLButtonElement | null)?.focus()
+}
+
+function closeShortcuts(): void {
+  shortcutsModalEl.hidden = true
+}
+
+document.getElementById('shortcuts-close')!.addEventListener('click', closeShortcuts)
+shortcutsModalEl.addEventListener('mousedown', (e) => {
+  if (e.target === shortcutsModalEl) closeShortcuts()
+})
+// Capture so Escape closes the sheet before any pane-level dismissal.
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (shortcutsModalEl.hidden || e.key !== 'Escape') return
+    e.preventDefault()
+    e.stopPropagation()
+    closeShortcuts()
+  },
+  true
+)
+
+// Tab cycling alternates and direct tab jumps. Ctrl+Tab / ⌘/ live in the app
+// menu; these are the second bindings that need renderer-side handling.
+window.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+  if (e.metaKey && e.shiftKey && (e.key === ']' || e.key === '}')) {
+    e.preventDefault()
+    cycleTabs(1)
+    return
+  }
+  if (e.metaKey && e.shiftKey && (e.key === '[' || e.key === '{')) {
+    e.preventDefault()
+    cycleTabs(-1)
+    return
+  }
+  if (e.metaKey && !e.shiftKey && /^[1-9]$/.test(e.key)) {
+    const i = e.key === '9' ? tabs.length - 1 : Math.min(Number(e.key) - 1, tabs.length - 1)
+    if (i >= 0 && i < tabs.length) {
+      e.preventDefault()
+      void activateTab(i)
+    }
   }
 })
 

@@ -638,6 +638,93 @@ function derenderAdjacentMath(view: EditorView, dir: 'before' | 'after'): boolea
   return true
 }
 
+/**
+ * One indent step in prose. Non-breaking spaces, not a literal tab: HTML
+ * collapses tabs and runs of ordinary spaces in a paragraph, and a tab at the
+ * start of a markdown line is four spaces of indentation, which turns the
+ * paragraph into a code block the next time the file is opened. NBSP renders
+ * the indent and survives every save/reload unchanged.
+ */
+const INDENT_UNIT = '\u00A0\u00A0\u00A0\u00A0'
+
+/**
+ * Tab / ⇧Tab in the rich editor: indent or outdent the text blocks the
+ * selection touches. Lists keep their own Tab behaviour (nest / un-nest), and
+ * fenced code keeps real tabs because they are part of the program text.
+ * Returns false when another keymap (TipTap's list commands) should handle it.
+ */
+function handleTabIndent(view: EditorView, outdent: boolean): boolean {
+  const { state } = view
+  const { selection } = state
+  const { from, to } = selection
+  const $from = selection.$from
+
+  const parentName = $from.node(-1)?.type.name
+  if (
+    $from.parent.type.name === 'listItem' ||
+    parentName === 'listItem' ||
+    parentName === 'taskItem'
+  ) {
+    return false
+  }
+
+  if ($from.parent.type.name === 'codeBlock') {
+    if (!outdent) {
+      view.dispatch(state.tr.insertText('\t', from, to))
+      return true
+    }
+    if (from !== to) return false
+    const before = $from.parent.textBetween(
+      Math.max(0, $from.parentOffset - 4),
+      $from.parentOffset,
+      undefined,
+      '￼'
+    )
+    const run = /(\t| {1,4})$/.exec(before)
+    if (run) view.dispatch(state.tr.delete(from - run[0].length, from))
+    return true
+  }
+
+  // Every text block the selection touches, with the position before it.
+  const blocks: number[] = []
+  state.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.isTextblock) {
+      blocks.push(pos)
+      return false
+    }
+    return true
+  })
+  // A collapsed caret does not descend into its own text block.
+  if (blocks.length === 0 && $from.parent.isTextblock) blocks.push($from.start() - 1)
+  if (blocks.length === 0) return false
+
+  const tr = state.tr
+  // Back to front so the earlier block positions stay valid.
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const blockPos = blocks[i]
+    const node = tr.doc.nodeAt(blockPos)
+    if (!node || !node.isTextblock) continue
+    const start = blockPos + 1
+    if (!outdent) {
+      tr.insertText(INDENT_UNIT, start)
+      continue
+    }
+    // Remove one indent step: a tab, or up to four leading spaces.
+    let n = 0
+    for (const ch of node.textContent.slice(0, 4)) {
+      if (ch === '\t') {
+        n = 1
+        break
+      }
+      if (ch === ' ' || ch === '\u00A0') n++
+      else break
+    }
+    if (n > 0) tr.delete(start, start + n)
+  }
+  if (tr.docChanged) view.dispatch(tr)
+  return true
+}
+
 interface MathNodeViewProps {
   node: PMNode
   editor: Editor
@@ -3443,6 +3530,16 @@ export function createRichEditor(
             event.preventDefault()
             return true
           }
+        }
+        // Tab indents the line instead of moving focus out of the page.
+        if (
+          menuEl.hidden &&
+          event.key === 'Tab' &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey
+        ) {
+          if (handleTabIndent(view, event.shiftKey)) return true
         }
         if (menuEl.hidden) return false
         if (event.key === 'ArrowDown') {
